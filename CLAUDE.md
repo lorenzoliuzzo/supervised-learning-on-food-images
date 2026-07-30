@@ -20,6 +20,9 @@ grading criterion, not a preference. Any change to `model.py` must keep
   comparison. **Do not edit it.**
 - `food101.py` — Food-101 side experiments.
 - `report/` — Typst sources for the report. Don't edit unless the issue says to.
+- `plans/` — dated roadmaps, `YYYY-MM-DD-slug.md`. Update the checkboxes and the
+  `Status:` line of the active plan as work lands, rather than rewriting history.
+  Numbers in a plan must come from a run or a benchmark we actually did.
 - `tests/` — pytest.
 
 ## Conventions

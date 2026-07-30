@@ -1,8 +1,9 @@
+import torch
 import torch.nn as nn
 
 
 class FoodCNN(nn.Module):
-    def __init__(self, num_classes=251):
+    def __init__(self, num_classes: int = 251) -> None:
         super().__init__()
 
         # We use a modular approach with Batch Normalization
@@ -38,21 +39,21 @@ class FoodCNN(nn.Module):
             nn.Linear(256, num_classes)
         )
 
-    def _conv_block(self, in_channels, out_channels):
+    def _conv_block(self, in_channels: int, out_channels: int) -> nn.Sequential:
         return nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
             nn.BatchNorm2d(out_channels), # Essential for fast convergence
             nn.ReLU(inplace=True)
         )
 
-    def _conv_block_dilated(self, in_channels, out_channels):
+    def _conv_block_dilated(self, in_channels: int, out_channels: int) -> nn.Sequential:
         return nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=2, dilation=2),
             nn.BatchNorm2d(out_channels), # Essential for fast convergence
             nn.ReLU(inplace=True)
         )
 
-    def _identity_block(self, in_channels, out_channels):
+    def _identity_block(self, in_channels: int, out_channels: int) -> nn.Sequential:
         return nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size=1),
             nn.BatchNorm2d(out_channels),
@@ -66,14 +67,20 @@ class FoodCNN(nn.Module):
             nn.Conv2d(in_channels, out_channels, kernel_size=1)
         )
 
-    def _conv_separable_block(self, in_channels, out_channels):
+    def _conv_separable_block(self, in_channels: int, out_channels: int) -> nn.Sequential:
         return nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, groups=in_channels, stride=1),
+            # depthwise: one 3x3 filter per input channel, no cross-channel mixing
+            nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1, groups=in_channels),
+            nn.BatchNorm2d(in_channels),
             nn.ReLU(inplace=True),
-            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
+
+            # pointwise: 1x1 mixes channels, expands to out_channels
+            nn.Conv2d(in_channels, out_channels, kernel_size=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
         )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.features(x)
         x = self.avgpool(x)
         x = self.classifier(x)

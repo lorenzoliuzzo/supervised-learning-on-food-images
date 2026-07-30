@@ -137,6 +137,13 @@ than the new shortcut BNs add back). 17 tests pass, `ruff check .` clean.
 
 - [ ] 15-epoch proxies on the winning trunk: LR in {0.05, 0.1, 0.2, 0.4} at
       batch 256; TrivialAugment vs RandAugment; Mixup/CutMix on/off; EMA on/off.
+- [ ] **Batch size in {160, 256, 512}, LR scaled with it (linear scaling rule).**
+      Measured on the baseline trunk at 176 px: throughput is flat across this
+      range (1738-1785 img/s, batch 160-768), VRAM scaling linearly from 1.28 to
+      5.64 GiB — the GPU is compute-saturated at batch 160, not idle, so this
+      buys nothing in wall-clock. The reason to sweep it anyway is gradient
+      noise and BatchNorm statistics, which do change with batch size; that is
+      an accuracy question, not a throughput one.
 - [ ] One proxy for noise handling: CE + label smoothing vs GCE. Adopt only if it
       wins. Co-teaching stays out — two networks is a 2x cost with no evidence
       behind it here.

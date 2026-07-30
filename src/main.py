@@ -420,12 +420,13 @@ def main_worker(gpu, ngpus_per_node, args):
             train_sampler.set_epoch(epoch)
 
         # train for one epoch
+        lr_used = optimizer.param_groups[0]['lr']
         train_loss, train_acc1, train_acc3, train_acc5 = train(
             train_loader, model, criterion, optimizer, epoch, device, args, ema_model=ema_model)
 
         # evaluate on validation set
         acc1, acc3, acc5 = validate(val_loader, eval_model, criterion, args)
-        run.record(epoch, train_loss, train_acc1, train_acc3, train_acc5, acc1, acc3, acc5)
+        run.record(epoch, lr_used, train_loss, train_acc1, train_acc3, train_acc5, acc1, acc3, acc5)
 
         scheduler.step()
 

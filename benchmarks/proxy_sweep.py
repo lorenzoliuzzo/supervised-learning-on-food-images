@@ -108,10 +108,11 @@ def run_proxy(
     print(f"\n=== {label} ({params / 1e6:.2f}M params) ===")
     for epoch in range(epochs):
         started = time.perf_counter()
+        lr_used = optimizer.param_groups[0]['lr']
         train_loss, train_acc1, train_acc3, train_acc5 = train(
             train_loader, model, criterion, optimizer, epoch, device, args)
         val_acc1, val_acc3, val_acc5 = validate(val_loader, model, criterion, args)
-        run.record(epoch, train_loss, train_acc1, train_acc3, train_acc5,
+        run.record(epoch, lr_used, train_loss, train_acc1, train_acc3, train_acc5,
                    val_acc1, val_acc3, val_acc5)
         scheduler.step()
         print(f"  epoch {epoch:2d}  train_loss {train_loss:.3f}  "

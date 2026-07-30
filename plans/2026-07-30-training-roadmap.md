@@ -1,6 +1,6 @@
 # Training roadmap
 
-**Status:** Phases A, B, C done; smoke test converged at 61.57% val-dev top-1; trunk decided (baseline, provisional); Phase D not started · **Baseline `main`:** `820f347` · **Last measured:** 2026-07-30
+**Status:** Phases A, B, C done; smoke test converged at 61.57% val-dev top-1; trunk decided (baseline, provisional); Phase D LR sweep done (0.4 wins, range likely needs extending) · **Baseline `main`:** `820f347` · **Last measured:** 2026-07-30
 
 Every number here was measured on the project box (RTX 5050 Laptop, 8 GB VRAM,
 16 threads) at 176 px / bf16 / `channels_last`, in `performance` power profile,
@@ -196,8 +196,28 @@ recipe are both decided.
 
 ## Phase D — recipe, then the full run (~4.2 GPU-h)
 
-- [ ] 15-epoch proxies on the winning trunk: LR in {0.05, 0.1, 0.2, 0.4} at
+- [x] 15-epoch proxies on the winning trunk: LR in {0.05, 0.1, 0.2, 0.4} at
       batch 256; TrivialAugment vs RandAugment; Mixup/CutMix on/off; EMA on/off.
+
+      LR sweep (baseline trunk, batch 256, ~23-27 min/run — see
+      `runs/plots/comparison-val_acc1.png`):
+
+      | LR | val-dev top-1 | top-3 | top-5 |
+      | --- | --- | --- | --- |
+      | 0.05 | 43.96% | — | — |
+      | 0.10 (prior default) | 49.41% | — | — |
+      | 0.20 | 52.56% | — | — |
+      | **0.40** | **54.02%** | 74.16% | 81.02% |
+
+      (Top-3/top-5 only logged for the 0.4 leg — top-3 tracking landed
+      mid-sweep; see "Decisions taken".) Monotonic across the whole tested
+      range, and the plot shows 0.4 ahead or competitive for most of the run,
+      not just a last-epoch fluke — this isn't noise. **0.4 is the best of
+      the four tested, but it's also the top of the tested range**, which is
+      the standard signal to extend the search rather than stop: worth a
+      cheap follow-up proxy at 0.6-0.8 before locking in 0.4 for the final
+      run. TrivialAugment/RandAugment/Mixup/CutMix/EMA proxies not run yet —
+      the code landed (see "Decisions taken") but the sweep hasn't.
 - [ ] **Batch size in {160, 256, 512}, LR scaled with it (linear scaling rule).**
       Measured on the baseline trunk at 176 px: throughput is flat across this
       range (1738-1785 img/s, batch 160-768), VRAM scaling linearly from 1.28 to
@@ -270,6 +290,21 @@ together, but for unrelated reasons.
   defined in `benchmarks/trunk_variants.VARIANTS` and can be re-proxied (or
   re-run with a second seed, per the option not taken here) without redoing
   any of the measurement work above.
+- **Phase D recipe axes are implemented in `main.py`, opt-in, all defaulting
+  to off**: `--augment {trivial,rand}`, `--mix {mixup,cutmix}`, `--ema`,
+  `--loss gce`. None have been proxied yet — the code landing and the sweep
+  running are separate steps, don't conflate "implemented" with "measured."
+  Checkpoints are namespaced under `checkpoints/<run-label>.pth.tar`, fixing
+  a real bug where sequential runs silently overwrote each other's weights
+  (the smoke test's converged checkpoint was lost this way; its logged
+  metrics in `runs/` were not affected).
+- **Analysis tooling**: `benchmarks/plot_runs.py` (learning-curve and
+  multi-run comparison plots) and `benchmarks/analyze_errors.py`
+  (classification report, top-confused class pairs, per-class accuracy,
+  confidence histogram, t-SNE of penultimate features — CPU-default, reads
+  a checkpoint, doesn't require the GPU). Per-epoch `lr` and top-3 accuracy
+  are now logged in `RunLog`; older logs in `runs/` predate both fields and
+  are read by `plot_runs.py` without crashing rather than backfilled.
 
 Both were settled on 2026-07-30. Reopen them here rather than silently
 diverging in code.

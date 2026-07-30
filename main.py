@@ -26,8 +26,8 @@ from torchsummary import summary
 from model import FoodCNN
 
 parser = argparse.ArgumentParser(description='PyTorch Food251 Training')
-parser.add_argument('data', metavar='DIR', nargs='?', default='foot251',
-                    help='path to dataset (default: foot251)')
+parser.add_argument('data', metavar='DIR', nargs='?', default='food251',
+                    help='path to dataset (default: food251)')
 parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                     help='number of data loading workers (default: 4)')
 parser.add_argument('--epochs', default=90, type=int, metavar='N',
@@ -100,6 +100,15 @@ class FoodX251Dataset(torch.utils.data.Dataset):
         # Labels are small; return as a scalar, not a tensor, 
         # let the DataLoader stack it into a tensor later to save VRAM.
         return image, int(self.labels[idx])
+
+def dataset_paths(
+    data_root: str | pathlib.Path,
+) -> tuple[tuple[pathlib.Path, pathlib.Path], tuple[pathlib.Path, pathlib.Path]]:
+    root = pathlib.Path(data_root)
+    train = (root / 'train_set', root / 'meta' / 'train_labels.csv')
+    val = (root / 'val_set', root / 'meta' / 'val_labels.csv')
+    return train, val
+
 
 best_acc1 = 0
 
@@ -246,9 +255,11 @@ def main_worker(gpu, ngpus_per_node, args):
     # Data loading code
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
+    (train_dir, train_labels), (val_dir, val_labels) = dataset_paths(args.data)
+
     train_dataset = FoodX251Dataset(
-        'food251/train_set',
-        'food251/meta/train_labels.csv',
+        train_dir,
+        train_labels,
         transforms.Compose([
             transforms.RandomResizedCrop(224),
             transforms.RandomHorizontalFlip(),
@@ -258,8 +269,8 @@ def main_worker(gpu, ngpus_per_node, args):
     )
 
     val_dataset = FoodX251Dataset(
-        'food251/train_set',
-        'food251/meta/train_labels.csv',
+        val_dir,
+        val_labels,
         transforms.Compose([
             transforms.Resize(256),
             transforms.CenterCrop(224),

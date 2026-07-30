@@ -13,8 +13,10 @@ class EpochRecord:
     epoch: int
     train_loss: float
     train_acc1: float
+    train_acc3: float
     train_acc5: float
     val_acc1: float
+    val_acc3: float
     val_acc5: float
 
 
@@ -36,12 +38,15 @@ class RunLog:
         epoch: int,
         train_loss: float,
         train_acc1: float,
+        train_acc3: float,
         train_acc5: float,
         val_acc1: float,
+        val_acc3: float,
         val_acc5: float,
     ) -> None:
         self.history.append(
-            EpochRecord(epoch, train_loss, train_acc1, train_acc5, val_acc1, val_acc5)
+            EpochRecord(epoch, train_loss, train_acc1, train_acc3, train_acc5,
+                        val_acc1, val_acc3, val_acc5)
         )
 
     def save(self, directory: Path, *, peak_vram_gib: float = 0.0) -> Path:

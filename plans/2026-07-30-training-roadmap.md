@@ -1,6 +1,6 @@
 # Training roadmap
 
-**Status:** Phase A done, Phase B not started · **Baseline `main`:** `820f347` · **Last measured:** 2026-07-30
+**Status:** Phases A and B done, Phase C measured (trunk choice open), smoke test converged at 61.57% val-dev top-1 · **Baseline `main`:** `820f347` · **Last measured:** 2026-07-30
 
 Every number here was measured on the project box (RTX 5050 Laptop, 8 GB VRAM,
 16 threads) at 176 px / bf16 / `channels_last`, in `performance` power profile,
@@ -112,26 +112,87 @@ than the new shortcut BNs add back). 17 tests pass, `ruff check .` clean.
 
 ## Phase B — freeze the protocol before any run
 
-- [ ] **Split the 11,994-image val set 50/50, stratified, into `val-dev` and
+- [x] **Split the 11,994-image val set 50/50, stratified, into `val-dev` and
       `val-test`** (decided). Ablations and checkpoint selection read `val-dev`
       only; `val-test` is touched once, for the report's headline number. Without
-      this the headline is selected-on. The split is generated from a fixed seed
-      and committed as a file, not recomputed per run — a split that drifts is
-      worse than no split. (4 classes have <20 val images and 1 has 2; those
-      per-class numbers stay noisy either way.)
-- [ ] **Fixed seed and a fixed 15-epoch proxy protocol** for every comparison.
+      this the headline is selected-on. The split must not drift between runs —
+      every one of the 251 classes lands within 1 image of an exact 50/50 split
+      (6,063 dev / 5,931 test).
+      Implemented in `src/make_val_split.py` (per-class shuffle-and-halve, fixed
+      seed 251) as a pure function of `food251/meta/val_labels.csv`, so it's
+      byte-identical on every regeneration — that determinism is what replaces
+      committing the output: `splits/val_split.csv` is gitignored (12k rows,
+      no information not already in the dataset + one seed), regenerate with
+      `python src/make_val_split.py` before the first training run on a fresh
+      checkout.
+- [x] **Fixed seed and a fixed 15-epoch proxy protocol** for every comparison.
       At ~1.2 min/epoch a proxy run is ~18 minutes, so comparisons that would be
       unaffordable at 90 epochs are routine. Rank on the proxy, confirm once at
       full length.
-- [ ] **Per-run logging**: config hash, per-epoch train/val top-1 and top-5,
+      `main.py --val-subset dev` (default) reads `splits/val_split.csv` and
+      restricts validation to val-dev automatically; `--val-subset test` is the
+      explicit, one-time opt-in for the report's headline number.
+- [x] **Per-run logging**: config hash, per-epoch train/val top-1 and top-5,
       wall-clock, peak VRAM. Capture what the report needs the first time.
+      `src/runlog.py` (`RunLog`), wired into `main.py`'s epoch loop and into
+      `benchmarks/proxy_sweep.py`; writes gitignored JSON under `runs/`.
 
 ## Phase C — pick the architecture (~1.2 GPU-h)
 
-- [ ] Four 15-epoch proxy runs on `val-dev` top-1: baseline 6.58M ·
-      `[2,2,4,1]` 8.94M · `[2,2,2,2]` 64-448 9.46M · 5-stage 48-512 9.08M.
-      This answers whether the 5-stage variant's 3x3 final map costs accuracy.
-      Either answer belongs in the report.
+- [x] Four 15-epoch proxy runs on `val-dev` top-1, real data via
+      `benchmarks/proxy_sweep.py` (logs in gitignored `runs/phaseC/`), single
+      seed each, ~83 min total wall clock:
+
+      | Variant | Params | val-dev top1 | val-dev top5 | Peak VRAM |
+      | --- | --- | --- | --- | --- |
+      | `[2,2,2,2]` 64-448 | 9.46M | **49.99%** | 78.29% | 2.04 GiB |
+      | `[2,2,4,1]` 64-512 | 8.94M | 49.73% | 77.93% | 2.14 GiB |
+      | baseline `[2,2,2,1]` 64-512 | 6.58M | 48.82% | 77.12% | 1.99 GiB |
+      | 5-stage 48-512 `[2,2,2,2,1]` | 9.08M | 47.42% | 75.94% | 1.61 GiB |
+
+      **The 5-stage variant's 3x3 final map does cost accuracy** — it's
+      1.4-2.6 points behind the three 6x6-final-map trunks despite having the
+      second-most parameters, so its throughput/VRAM win from §3 does not
+      carry over to a real training signal. Ruled out.
+
+      The other three are within 1.2 points of each other on a *single*
+      15-epoch run with no repeated seeds — not enough to call a winner with
+      confidence. `[2,2,2,2]` 64-448 nominally leads but only by 0.26 points
+      over `[2,2,4,1]`, well inside plausible run-to-run noise. Baseline
+      trails the leader by 1.17 points at 30% fewer parameters. **This is an
+      architecture decision, not a measurement one — recorded here, not
+      acted on.** See "Open decision" below.
+
+      (`benchmarks/trunk_variants.py`'s stem conv was missing `bias=False`, a
+      Phase A change that hadn't propagated there; fixed after this sweep ran,
+      so the four runs above trained with a 64-parameter stem bias none of
+      the graded architecture has. Negligible next to the multi-point gaps
+      above, not worth rerunning for; future sweeps use the corrected stem.)
+
+## Smoke test — pipeline validated, not a Phase D result
+
+A full 90-epoch run on the unmodified baseline `FoodCNN` (Phase A recipe,
+`--val-subset dev`, no Phase D recipe tuning yet), run to prove the pipeline
+survives full length before spending Phase D's GPU-hours on it. It is not the
+"one 90-epoch run" Phase D calls for — that one happens after the trunk and
+recipe are both decided.
+
+- **Converged at 61.57% val-dev top-1 / 85.67% top-5** (best epoch 82:
+  62.08% / 85.52% — `model_best.pth.tar`, not the final checkpoint, is the
+  one to keep). Up from ~7% at epoch 0, matching the tail-heavy climb the
+  15-epoch proxy already hinted at in §Phase C, and well past both the
+  Food-101-from-scratch loose anchor (mid-50s%) and the proxy's own 47-50%.
+- **No crashes, NaNs, or OOM across the full run.** Checkpointing (regular +
+  best) worked correctly. Peak VRAM 1.99 GiB — still far under the 8 GiB
+  ceiling even at the full 90 epochs.
+- **Wall clock: 2.31 h, not the ~1.8 h estimated in §3.** Per-batch time rose
+  from ~0.16 s early on to ~0.26 s past epoch ~60 (`clocks_event_reasons.active`
+  showed `SW_POWER_CAP` again) — sustained 90-epoch load heat-soaks this
+  laptop GPU more than the short benchmark sweeps in `benchmarks/` ever
+  triggered. The existing power-cap caveat at the top of this file already
+  says to treat throughput figures as an upper bound; this is the concrete
+  case where a full run ran ~28% slower than a synthetic estimate. Phase D's
+  budget should assume real runs, not benchmark rates.
 
 ## Phase D — recipe, then the full run (~4.2 GPU-h)
 
@@ -190,6 +251,19 @@ The supervised half of this is ~5 GPU-h; Phase E is the other 70%. Note the
 earlier estimate of ~29 h was measured in `balanced` power profile and under
 contention, understating throughput by ~1.7x — the totals happen to land close
 together, but for unrelated reasons.
+
+## Open decision
+
+**Which trunk to carry into Phase D.** Phase C ruled out the 5-stage variant
+but left a three-way pick (baseline / `[2,2,4,1]` / `[2,2,2,2]` 64-448) that a
+single 15-epoch run can't resolve with confidence — the spread among them
+(1.17 points) is comparable to what one seed change could plausibly move.
+`model.py` was **not** changed while this was open; the graded architecture
+is still the Phase A baseline. Options: (a) accept `[2,2,2,2]` 64-448 on the
+nominal lead, (b) keep the baseline for its 30%-fewer-parameters margin and
+put the saved budget toward Phase D's recipe instead, (c) rerun the top two
+with a second seed before deciding. Needs a call before Phase D locks in a
+trunk to tune the recipe around.
 
 ## Decisions taken
 

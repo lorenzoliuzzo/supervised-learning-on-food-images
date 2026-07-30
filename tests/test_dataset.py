@@ -3,7 +3,7 @@ import pathlib
 import pandas as pd
 from PIL import Image
 
-from main import FoodX251Dataset, dataset_paths
+from main import FoodX251Dataset, dataset_paths, load_val_split
 
 
 def _write_split(
@@ -71,3 +71,58 @@ def test_val_dataset_yields_the_val_label(tmp_path: pathlib.Path) -> None:
     _, target = FoodX251Dataset(val_dir, val_labels)[0]
 
     assert target == 42
+
+
+def _write_multi_image_split(root: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
+    image_dir = root / 'val_set'
+    image_dir.mkdir(parents=True)
+    names = ['val_000000.jpg', 'val_000001.jpg', 'val_000002.jpg']
+    for name in names:
+        Image.new('RGB', (8, 8)).save(image_dir / name)
+
+    meta_dir = root / 'meta'
+    meta_dir.mkdir(exist_ok=True)
+    labels_path = meta_dir / 'val_labels.csv'
+    pd.DataFrame({'img_name': names, 'label': [1, 2, 3]}).to_csv(labels_path, index=False)
+    return image_dir, labels_path
+
+
+def test_dataset_subset_keeps_only_the_named_images(tmp_path: pathlib.Path) -> None:
+    image_dir, labels_path = _write_multi_image_split(tmp_path)
+
+    dataset = FoodX251Dataset(image_dir, labels_path, subset={'val_000000.jpg', 'val_000002.jpg'})
+
+    assert dataset.image_names == ['val_000000.jpg', 'val_000002.jpg']
+    assert dataset.labels == [1, 3]
+
+
+def test_dataset_without_subset_keeps_every_image(tmp_path: pathlib.Path) -> None:
+    image_dir, labels_path = _write_multi_image_split(tmp_path)
+
+    dataset = FoodX251Dataset(image_dir, labels_path)
+
+    assert len(dataset) == 3
+
+
+def test_load_val_split_dev_and_test_are_disjoint(tmp_path: pathlib.Path) -> None:
+    split_path = tmp_path / 'val_split.csv'
+    pd.DataFrame({
+        'img_name': ['val_000000.jpg', 'val_000001.jpg', 'val_000002.jpg'],
+        'label': [1, 2, 3],
+        'split': ['dev', 'test', 'dev'],
+    }).to_csv(split_path, index=False)
+
+    dev = load_val_split(split_path, 'dev')
+    test = load_val_split(split_path, 'test')
+
+    assert dev == {'val_000000.jpg', 'val_000002.jpg'}
+    assert test == {'val_000001.jpg'}
+    assert dev.isdisjoint(test)
+
+
+def test_load_val_split_all_returns_none() -> None:
+    assert load_val_split('splits/val_split.csv', 'all') is None
+
+
+def test_load_val_split_missing_file_falls_back_to_none(tmp_path: pathlib.Path) -> None:
+    assert load_val_split(tmp_path / 'does_not_exist.csv', 'dev') is None

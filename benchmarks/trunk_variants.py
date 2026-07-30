@@ -30,7 +30,7 @@ def trunk(
     # Reuses the repo's own ResidualBlock so the comparison is against FoodCNN's
     # actual building block, not a lookalike.
     layers: list[nn.Module] = [
-        nn.Conv2d(3, widths[0], kernel_size=3, stride=2, padding=1),
+        nn.Conv2d(3, widths[0], kernel_size=3, stride=2, padding=1, bias=False),
         nn.BatchNorm2d(widths[0]),
         nn.ReLU(inplace=True),
     ]

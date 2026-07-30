@@ -110,10 +110,12 @@ All variants under the 10M cap, at 176 px / batch 160:
 ## Phase B — freeze the protocol before any run
 
 - [ ] **Split the 11,994-image val set 50/50, stratified, into `val-dev` and
-      `val-test`.** Ablations and checkpoint selection read `val-dev` only;
-      `val-test` is touched once, for the report. Without this the headline number
-      is selected-on. (4 classes have <20 val images and 1 has 2; those per-class
-      numbers stay noisy either way.)
+      `val-test`** (decided). Ablations and checkpoint selection read `val-dev`
+      only; `val-test` is touched once, for the report's headline number. Without
+      this the headline is selected-on. The split is generated from a fixed seed
+      and committed as a file, not recomputed per run — a split that drifts is
+      worse than no split. (4 classes have <20 val images and 1 has 2; those
+      per-class numbers stay noisy either way.)
 - [ ] **Fixed seed and a fixed 15-epoch proxy protocol** for every comparison.
       At ~1.2 min/epoch a proxy run is ~18 minutes, so comparisons that would be
       unaffordable at 90 epochs are routine. Rank on the proxy, confirm once at
@@ -139,21 +141,20 @@ All variants under the 10M cap, at 176 px / batch 160:
       correction (train 176, test 224 centre crop).
 - [ ] Optional, cheap to measure: `torch.compile`.
 
-## Phase E — self-supervised track (~8 GPU-h as scoped)
+## Phase E — self-supervised track (~18 GPU-h)
 
-SimSiam/BYOL needs two augmented views per step, so an epoch costs ~2x. At 200
-pretrain epochs and 176 px that is ~8 h, plus ~1.8 h finetune, plus the
-equal-GPU-hours supervised control the comparison requires — ~18 h unscoped.
-Scoped to 100 epochs at 128 px it is ~2 h pretrain + 1.8 h finetune + ~4 h
-control. The 128 px figure is scaled from the measured 176 px rate, not measured
-directly — confirm it before committing to the schedule.
+**Decided: the full setting — 200 pretrain epochs at 176 px.** SimSiam/BYOL needs
+two augmented views per step, so an epoch costs ~2x: ~8 h pretrain, ~1.8 h
+finetune, ~8 h for the control. This is more GPU time than the entire rest of the
+plan combined, and it is deliberate — it keeps the result comparable to the
+published SimSiam/BYOL settings instead of inviting "you under-trained it".
 
-- [ ] Pretrain at 128 px, finetune at 176 — standard, and roughly halves the cost.
-- [ ] Cap pretraining at 100 epochs, and report the cap as a limitation rather
-      than concluding SSL "does not work" from an under-trained run.
+- [ ] Pretrain 200 epochs at 176 px, then finetune at 176.
 - [ ] **The control is not optional**: SSL-pretrain + finetune must be compared
       against spending those same GPU-hours on longer supervised training.
       Without it the result is uninterpretable.
+- [ ] Checkpoint pretraining often enough that an interrupted 8 h run is
+      resumable — at this length that is a practical requirement, not a nicety.
 
 SimCLR is excluded — it degrades below ~1k batch, unreachable in 8 GB.
 
@@ -171,17 +172,21 @@ SimCLR is excluded — it degrades below ~1k batch, unreachable in 8 GB.
 | C — architecture proxies (4 x 18 min) | 1.2 |
 | D — recipe proxies (8 x 18 min) | 2.4 |
 | D — full supervised run (90 ep) | 1.8 |
-| E — SSL track including control | ~8 |
+| E — SSL track including control | ~18 |
 | slack / reruns | 3 |
-| **total** | **~17** |
+| **total** | **~26** |
 
-Roughly half the previous estimate: the earlier figures were measured in
-`balanced` power profile and under contention, which understated throughput by
-~1.7x.
+The supervised half of this is ~5 GPU-h; Phase E is the other 70%. Note the
+earlier estimate of ~29 h was measured in `balanced` power profile and under
+contention, understating throughput by ~1.7x — the totals happen to land close
+together, but for unrelated reasons.
 
-## Open decisions
+## Decisions taken
 
-1. **`val-dev` / `val-test` split — yes or no?** Recommended yes; it is the
-   difference between a defensible headline number and a selected-on one.
-2. **SSL scope**: 100 epochs at 128 px (recommended, ~16 h with control) versus
-   the full 200 at 176 px (~32 h).
+- **Val split: 50/50 stratified `val-dev` / `val-test`.** Model selection never
+  touches `val-test`; the report quotes it once.
+- **SSL scope: the full setting, 200 epochs at 176 px**, with the
+  equal-GPU-hours supervised control.
+
+Both were settled on 2026-07-30. Reopen them here rather than silently
+diverging in code.

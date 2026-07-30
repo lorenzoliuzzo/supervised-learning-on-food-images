@@ -11,17 +11,28 @@ class ResidualBlock(nn.Module):
         # reading it; at stride 1 that is invisible, but this trunk downsamples
         # three times, so it would throw away most of the signal.
         self.conv = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1),
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
-            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
         )
-        # Only project the shortcut when the addition would otherwise be shape-mismatched.
+        # Zero-init this BN's gamma (Goyal et al., "Bag of Tricks", 2018): the
+        # residual branch starts at zero, so each block begins as an identity
+        # map. That is what makes warmup plus a high LR safe.
+        nn.init.zeros_(self.conv[-1].weight)
+
+        # Only project the shortcut when the addition would otherwise be
+        # shape-mismatched. BatchNorm after the projection, same as
+        # torchvision's ResNet `downsample` -- without it an unnormalized
+        # branch was being added to a BN'd one.
         self.shortcut: nn.Module = (
             nn.Identity()
             if in_channels == out_channels and stride == 1
-            else nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride)
+            else nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(out_channels),
+            )
         )
         # Activation goes after the addition, not inside self.conv: that is what
         # makes the block a nonlinearity rather than an affine detour.
@@ -42,7 +53,7 @@ class FoodCNN(nn.Module):
         self.features = nn.Sequential(
             # Stem: 224 -> 112 -> 56 before any residual stage, so the expensive
             # stages never run at full resolution.
-            nn.Conv2d(3, 64, kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(3, 64, kernel_size=3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=3, stride=2, padding=1),

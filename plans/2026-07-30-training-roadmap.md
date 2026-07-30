@@ -1,6 +1,6 @@
 # Training roadmap
 
-**Status:** Phase A not started · **Baseline `main`:** `820f347` · **Last measured:** 2026-07-30
+**Status:** Phase A done, Phase B not started · **Baseline `main`:** `820f347` · **Last measured:** 2026-07-30
 
 Every number here was measured on the project box (RTX 5050 Laptop, 8 GB VRAM,
 16 threads) at 176 px / bf16 / `channels_last`, in `performance` power profile,
@@ -85,27 +85,30 @@ All variants under the 10M cap, at 176 px / batch 160:
 
 ## Phase A — pre-run gates (no GPU-hours)
 
-- [ ] **BatchNorm after the three shortcut projections** (`src/model.py:24`). They are
+- [x] **BatchNorm after the three shortcut projections** (`src/model.py:24`). They are
       bare `Conv2d`s, so an unnormalized branch is added to a BN'd one; torchvision's
       ResNet uses `conv1x1 + norm` in `downsample` for exactly this reason.
-- [ ] **`bias=False` on every conv followed by BatchNorm** — 3,776 no-op parameters.
-- [ ] **Zero-init the second BN's gamma in each block**, so each block starts as
+- [x] **`bias=False` on every conv followed by BatchNorm** — 3,776 no-op parameters.
+- [x] **Zero-init the second BN's gamma in each block**, so each block starts as
       identity. This is what makes warmup plus a high LR safe.
-- [ ] **`main.py` training loop**, keeping the argparse / `main_worker` shape:
-  - [ ] `torch.autocast("cuda", dtype=torch.bfloat16)` — **no `GradScaler`**; bf16
+- [x] **`main.py` training loop**, keeping the argparse / `main_worker` shape:
+  - [x] `torch.autocast("cuda", dtype=torch.bfloat16)` — **no `GradScaler`**; bf16
         does not need one.
-  - [ ] `channels_last` on model and inputs.
-  - [ ] cosine schedule with 5-epoch linear warmup, replacing `StepLR(30, 0.1)`.
-  - [ ] `CrossEntropyLoss(label_smoothing=0.1)`; SGD with `nesterov=True`.
-  - [ ] `--workers` default 4 to 8; train crop 224 to 176.
-  - [ ] drop the `nn.DataParallel` wrapper on a single GPU — it costs a
+  - [x] `channels_last` on model and inputs.
+  - [x] cosine schedule with 5-epoch linear warmup, replacing `StepLR(30, 0.1)`.
+  - [x] `CrossEntropyLoss(label_smoothing=0.1)`; SGD with `nesterov=True`.
+  - [x] `--workers` default 4 to 8; train crop 224 to 176.
+  - [x] drop the `nn.DataParallel` wrapper on a single GPU — it costs a
         scatter/gather per step and prefixes every checkpoint key with `module.`.
-- [ ] **Tests** (never reading `food251/`):
-  - [ ] single-batch overfit gate — 200 steps on fixed `randn` drives loss below
+- [x] **Tests** (never reading `food251/`):
+  - [x] single-batch overfit gate — 200 steps on fixed `randn` drives loss below
         0.1. The cheapest possible proof the trunk can learn, and the one thing
         that would otherwise waste a 2-hour run.
-  - [ ] `channels_last` survives the forward pass.
-  - [ ] warmup+cosine LR hits expected values at epochs 0, 5 and last.
+  - [x] `channels_last` survives the forward pass.
+  - [x] warmup+cosine LR hits expected values at epochs 0, 5 and last.
+
+Params after the BN/bias fixes: **6,576,955** (bias removal costs slightly more
+than the new shortcut BNs add back). 17 tests pass, `ruff check .` clean.
 
 ## Phase B — freeze the protocol before any run
 

@@ -48,3 +48,29 @@ def test_residual_block_activates_after_the_addition() -> None:
     out = block(torch.randn(2, 128, 8, 8))
 
     assert (out >= 0).all()
+
+
+def test_pooling_is_global() -> None:
+    # (7, 7) here is what put 94% of the budget into a single Linear.
+    model = FoodCNN(num_classes=251)
+    assert model.avgpool.output_size == (1, 1)
+
+
+def test_budget_is_spent_on_features_not_the_classifier() -> None:
+    # The original model had this backwards: 4.8% features, 95.2% classifier.
+    model = FoodCNN(num_classes=251)
+    features = sum(p.numel() for p in model.features.parameters())
+    classifier = sum(p.numel() for p in model.classifier.parameters())
+
+    assert features > 10 * classifier
+
+
+def test_every_parameter_receives_a_gradient() -> None:
+    # A residual branch wired up wrongly can leave whole blocks unreachable
+    # while the forward pass still returns the right shape.
+    model = FoodCNN(num_classes=251)
+    model.train()
+    loss = nn.CrossEntropyLoss()(model(torch.randn(4, 3, 176, 176)), torch.randint(0, 251, (4,)))
+    loss.backward()
+
+    assert all(p.grad is not None for p in model.parameters())

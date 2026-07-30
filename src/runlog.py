@@ -11,6 +11,7 @@ from typing import Any
 @dataclass
 class EpochRecord:
     epoch: int
+    lr: float
     train_loss: float
     train_acc1: float
     train_acc3: float
@@ -36,6 +37,7 @@ class RunLog:
     def record(
         self,
         epoch: int,
+        lr: float,
         train_loss: float,
         train_acc1: float,
         train_acc3: float,
@@ -45,7 +47,7 @@ class RunLog:
         val_acc5: float,
     ) -> None:
         self.history.append(
-            EpochRecord(epoch, train_loss, train_acc1, train_acc3, train_acc5,
+            EpochRecord(epoch, lr, train_loss, train_acc1, train_acc3, train_acc5,
                         val_acc1, val_acc3, val_acc5)
         )
 

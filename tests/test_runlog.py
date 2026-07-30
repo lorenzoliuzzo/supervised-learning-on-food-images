@@ -20,9 +20,9 @@ def test_config_hash_differs_for_different_configs() -> None:
 
 def test_save_writes_history_and_metadata(tmp_path: pathlib.Path) -> None:
     run = RunLog(label="baseline", config={"lr": 0.1, "epochs": 15})
-    run.record(epoch=0, train_loss=5.0, train_acc1=1.0, train_acc3=3.0, train_acc5=5.0,
+    run.record(epoch=0, lr=0.02, train_loss=5.0, train_acc1=1.0, train_acc3=3.0, train_acc5=5.0,
                val_acc1=0.5, val_acc3=2.0, val_acc5=3.0)
-    run.record(epoch=1, train_loss=4.5, train_acc1=2.0, train_acc3=4.0, train_acc5=7.0,
+    run.record(epoch=1, lr=0.04, train_loss=4.5, train_acc1=2.0, train_acc3=4.0, train_acc5=7.0,
                val_acc1=1.0, val_acc3=2.5, val_acc5=4.0)
 
     path = run.save(tmp_path, peak_vram_gib=1.23)
@@ -34,8 +34,8 @@ def test_save_writes_history_and_metadata(tmp_path: pathlib.Path) -> None:
     assert payload["peak_vram_gib"] == 1.23
     assert len(payload["history"]) == 2
     assert payload["history"][1] == {
-        "epoch": 1, "train_loss": 4.5, "train_acc1": 2.0, "train_acc3": 4.0, "train_acc5": 7.0,
-        "val_acc1": 1.0, "val_acc3": 2.5, "val_acc5": 4.0,
+        "epoch": 1, "lr": 0.04, "train_loss": 4.5, "train_acc1": 2.0, "train_acc3": 4.0,
+        "train_acc5": 7.0, "val_acc1": 1.0, "val_acc3": 2.5, "val_acc5": 4.0,
     }
 
 

@@ -10,6 +10,8 @@ dependencies = [
     "pandas>=2.0",
     "pillow>=10.0",
     "torchsummary>=1.5",
+    "matplotlib>=3.8",
+    "scikit-learn>=1.4",
 ]
 
 [project.optional-dependencies]
@@ -41,6 +43,7 @@ select = ["E4", "E7", "E9", "F", "I", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# Puts src/ on sys.path so tests keep importing `model` and `main` directly,
-# without an installed package or a sys.path hack in conftest.
-pythonpath = ["src"]
+# Puts src/ and benchmarks/ on sys.path so tests import `model`, `main`,
+# `plot_runs`, etc. directly, without an installed package or a sys.path
+# hack in conftest.
+pythonpath = ["src", "benchmarks"]

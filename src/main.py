@@ -420,12 +420,12 @@ def main_worker(gpu, ngpus_per_node, args):
             train_sampler.set_epoch(epoch)
 
         # train for one epoch
-        train_loss, train_acc1, train_acc5 = train(
+        train_loss, train_acc1, train_acc3, train_acc5 = train(
             train_loader, model, criterion, optimizer, epoch, device, args, ema_model=ema_model)
 
         # evaluate on validation set
-        acc1, acc5 = validate(val_loader, eval_model, criterion, args)
-        run.record(epoch, train_loss, train_acc1, train_acc5, acc1, acc5)
+        acc1, acc3, acc5 = validate(val_loader, eval_model, criterion, args)
+        run.record(epoch, train_loss, train_acc1, train_acc3, train_acc5, acc1, acc3, acc5)
 
         scheduler.step()
 
@@ -460,10 +460,11 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args, ema_mo
     data_time = AverageMeter('Data', use_accel, ':6.3f', Summary.NONE)
     losses = AverageMeter('Loss', use_accel, ':.4e', Summary.NONE)
     top1 = AverageMeter('Acc@1', use_accel, ':6.2f', Summary.NONE)
+    top3 = AverageMeter('Acc@3', use_accel, ':6.2f', Summary.NONE)
     top5 = AverageMeter('Acc@5', use_accel, ':6.2f', Summary.NONE)
     progress = ProgressMeter(
         len(train_loader),
-        [batch_time, data_time, losses, top1, top5],
+        [batch_time, data_time, losses, top1, top3, top5],
         prefix=f"Epoch: [{epoch}]")
 
     mixer = None
@@ -501,9 +502,10 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args, ema_mo
             loss = criterion(output, target)
 
         # measure accuracy and record loss
-        acc1, acc5 = accuracy(output, hard_target, topk=(1, 5))
+        acc1, acc3, acc5 = accuracy(output, hard_target, topk=(1, 3, 5))
         losses.update(loss.item(), images.size(0))
         top1.update(acc1[0], images.size(0))
+        top3.update(acc3[0], images.size(0))
         top5.update(acc5[0], images.size(0))
 
         # compute gradient and do SGD step
@@ -520,7 +522,7 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args, ema_mo
         if i % args.print_freq == 0:
             progress.display(i + 1)
 
-    return losses.avg, float(top1.avg), float(top5.avg)
+    return losses.avg, float(top1.avg), float(top3.avg), float(top5.avg)
 
 
 def validate(val_loader, model, criterion, args):
@@ -555,9 +557,10 @@ def validate(val_loader, model, criterion, args):
                     loss = criterion(output, target)
 
                 # measure accuracy and record loss
-                acc1, acc5 = accuracy(output, target, topk=(1, 5))
+                acc1, acc3, acc5 = accuracy(output, target, topk=(1, 3, 5))
                 losses.update(loss.item(), images.size(0))
                 top1.update(acc1[0], images.size(0))
+                top3.update(acc3[0], images.size(0))
                 top5.update(acc5[0], images.size(0))
 
                 # measure elapsed time
@@ -570,10 +573,11 @@ def validate(val_loader, model, criterion, args):
     batch_time = AverageMeter('Time', use_accel, ':6.3f', Summary.NONE)
     losses = AverageMeter('Loss', use_accel, ':.4e', Summary.NONE)
     top1 = AverageMeter('Acc@1', use_accel, ':6.2f', Summary.AVERAGE)
+    top3 = AverageMeter('Acc@3', use_accel, ':6.2f', Summary.AVERAGE)
     top5 = AverageMeter('Acc@5', use_accel, ':6.2f', Summary.AVERAGE)
     progress = ProgressMeter(
         len(val_loader) + (args.distributed and (len(val_loader.sampler) * args.world_size < len(val_loader.dataset))),
-        [batch_time, losses, top1, top5],
+        [batch_time, losses, top1, top3, top5],
         prefix='Test: ')
 
     # switch to evaluate mode
@@ -582,6 +586,7 @@ def validate(val_loader, model, criterion, args):
     run_validate(val_loader)
     if args.distributed:
         top1.all_reduce()
+        top3.all_reduce()
         top5.all_reduce()
 
     if args.distributed and (len(val_loader.sampler) * args.world_size < len(val_loader.dataset)):
@@ -594,7 +599,7 @@ def validate(val_loader, model, criterion, args):
 
     progress.display_summary()
 
-    return float(top1.avg), float(top5.avg)
+    return float(top1.avg), float(top3.avg), float(top5.avg)
 
 
 def save_checkpoint(state, is_best, filename):

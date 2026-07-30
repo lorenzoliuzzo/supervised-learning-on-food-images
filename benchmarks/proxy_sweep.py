@@ -108,13 +108,14 @@ def run_proxy(
     print(f"\n=== {label} ({params / 1e6:.2f}M params) ===")
     for epoch in range(epochs):
         started = time.perf_counter()
-        train_loss, train_acc1, train_acc5 = train(
+        train_loss, train_acc1, train_acc3, train_acc5 = train(
             train_loader, model, criterion, optimizer, epoch, device, args)
-        val_acc1, val_acc5 = validate(val_loader, model, criterion, args)
-        run.record(epoch, train_loss, train_acc1, train_acc5, val_acc1, val_acc5)
+        val_acc1, val_acc3, val_acc5 = validate(val_loader, model, criterion, args)
+        run.record(epoch, train_loss, train_acc1, train_acc3, train_acc5,
+                   val_acc1, val_acc3, val_acc5)
         scheduler.step()
         print(f"  epoch {epoch:2d}  train_loss {train_loss:.3f}  "
-              f"val_acc1 {val_acc1:5.2f}  val_acc5 {val_acc5:5.2f}  "
+              f"val_acc1 {val_acc1:5.2f}  val_acc3 {val_acc3:5.2f}  val_acc5 {val_acc5:5.2f}  "
               f"({time.perf_counter() - started:.0f}s)")
 
     peak_vram_gib = torch.cuda.max_memory_allocated() / 2**30

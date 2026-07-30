@@ -9,6 +9,7 @@ dependencies = [
     "torchvision>=0.19",
     "pandas>=2.0",
     "pillow>=10.0",
+    "torchsummary>=1.5",
 ]
 
 [project.optional-dependencies]

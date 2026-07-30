@@ -1,6 +1,6 @@
 # Training roadmap
 
-**Status:** Phases A, B, C done; smoke test converged at 61.57% val-dev top-1; trunk decided (baseline, provisional); Phase D LR sweep done (0.4 wins, range likely needs extending) · **Baseline `main`:** `820f347` · **Last measured:** 2026-07-30
+**Status:** Phases A, B, C done; smoke test converged at 61.57% val-dev top-1; trunk decided (baseline, provisional); Phase D LR search done (lr=0.8, 55.58% val-dev top-1); recipe proxies (aug/mixup/EMA/noise-loss) not run yet · **Baseline `main`:** `820f347` · **Last measured:** 2026-07-30
 
 Every number here was measured on the project box (RTX 5050 Laptop, 8 GB VRAM,
 16 threads) at 176 px / bf16 / `channels_last`, in `performance` power profile,
@@ -209,15 +209,28 @@ recipe are both decided.
       | 0.20 | 52.56% | — | — |
       | **0.40** | **54.02%** | 74.16% | 81.02% |
 
-      (Top-3/top-5 only logged for the 0.4 leg — top-3 tracking landed
-      mid-sweep; see "Decisions taken".) Monotonic across the whole tested
-      range, and the plot shows 0.4 ahead or competitive for most of the run,
-      not just a last-epoch fluke — this isn't noise. **0.4 is the best of
-      the four tested, but it's also the top of the tested range**, which is
-      the standard signal to extend the search rather than stop: worth a
-      cheap follow-up proxy at 0.6-0.8 before locking in 0.4 for the final
-      run. TrivialAugment/RandAugment/Mixup/CutMix/EMA proxies not run yet —
-      the code landed (see "Decisions taken") but the sweep hasn't.
+      (Top-3/top-5 only logged from the 0.4 leg onward — top-3 tracking
+      landed mid-sweep; see "Decisions taken".) Follow-up at the range's
+      edge, same protocol:
+
+      | LR | val-dev top-1 | Δ vs previous |
+      | --- | --- | --- |
+      | 0.40 | 54.02% | — |
+      | 0.60 | 54.96% | +0.94 |
+      | **0.80** | **55.58%** | +0.62 |
+
+      **Stopping the LR search at 0.8.** Gains shrink cleanly each doubling
+      (+5.45, +3.15, +1.46, +0.94, +0.62) — a textbook diminishing-returns
+      curve, so the next doubling (1.6) would likely buy ~0.3-0.4 points.
+      0.8's train-loss curve is smooth (lowest final loss, no divergence),
+      but its val-accuracy curve is visibly noisier mid-run than 0.4/0.6's
+      (a dip around epochs 8-9) — not instability, since loss never wobbles,
+      but a sign of pushing into a noisier optimization regime. Diminishing
+      reward plus growing noise flips the risk/reward; **0.8 is the LR
+      Phase D carries forward.**
+
+      TrivialAugment/RandAugment/Mixup/CutMix/EMA proxies not run yet — the
+      code landed (see "Decisions taken") but the sweep hasn't.
 - [ ] **Batch size in {160, 256, 512}, LR scaled with it (linear scaling rule).**
       Measured on the baseline trunk at 176 px: throughput is flat across this
       range (1738-1785 img/s, batch 160-768), VRAM scaling linearly from 1.28 to

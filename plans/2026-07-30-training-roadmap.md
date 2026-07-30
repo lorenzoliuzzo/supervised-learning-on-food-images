@@ -1,6 +1,6 @@
 # Training roadmap
 
-**Status:** Phases A and B done, Phase C running · **Baseline `main`:** `820f347` · **Last measured:** 2026-07-30
+**Status:** Phases A and B done, Phase C measured (trunk choice open, see below) · **Baseline `main`:** `820f347` · **Last measured:** 2026-07-30
 
 Every number here was measured on the project box (RTX 5050 Laptop, 8 GB VRAM,
 16 threads) at 176 px / bf16 / `channels_last`, in `performance` power profile,
@@ -137,10 +137,35 @@ than the new shortcut BNs add back). 17 tests pass, `ruff check .` clean.
 
 ## Phase C — pick the architecture (~1.2 GPU-h)
 
-- [ ] Four 15-epoch proxy runs on `val-dev` top-1: baseline 6.58M ·
-      `[2,2,4,1]` 8.94M · `[2,2,2,2]` 64-448 9.46M · 5-stage 48-512 9.08M.
-      This answers whether the 5-stage variant's 3x3 final map costs accuracy.
-      Either answer belongs in the report.
+- [x] Four 15-epoch proxy runs on `val-dev` top-1, real data via
+      `benchmarks/proxy_sweep.py` (logs in gitignored `runs/phaseC/`), single
+      seed each, ~83 min total wall clock:
+
+      | Variant | Params | val-dev top1 | val-dev top5 | Peak VRAM |
+      | --- | --- | --- | --- | --- |
+      | `[2,2,2,2]` 64-448 | 9.46M | **49.99%** | 78.29% | 2.04 GiB |
+      | `[2,2,4,1]` 64-512 | 8.94M | 49.73% | 77.93% | 2.14 GiB |
+      | baseline `[2,2,2,1]` 64-512 | 6.58M | 48.82% | 77.12% | 1.99 GiB |
+      | 5-stage 48-512 `[2,2,2,2,1]` | 9.08M | 47.42% | 75.94% | 1.61 GiB |
+
+      **The 5-stage variant's 3x3 final map does cost accuracy** — it's
+      1.4-2.6 points behind the three 6x6-final-map trunks despite having the
+      second-most parameters, so its throughput/VRAM win from §3 does not
+      carry over to a real training signal. Ruled out.
+
+      The other three are within 1.2 points of each other on a *single*
+      15-epoch run with no repeated seeds — not enough to call a winner with
+      confidence. `[2,2,2,2]` 64-448 nominally leads but only by 0.26 points
+      over `[2,2,4,1]`, well inside plausible run-to-run noise. Baseline
+      trails the leader by 1.17 points at 30% fewer parameters. **This is an
+      architecture decision, not a measurement one — recorded here, not
+      acted on.** See "Open decision" below.
+
+      (`benchmarks/trunk_variants.py`'s stem conv was missing `bias=False`, a
+      Phase A change that hadn't propagated there; fixed after this sweep ran,
+      so the four runs above trained with a 64-parameter stem bias none of
+      the graded architecture has. Negligible next to the multi-point gaps
+      above, not worth rerunning for; future sweeps use the corrected stem.)
 
 ## Phase D — recipe, then the full run (~4.2 GPU-h)
 
@@ -199,6 +224,19 @@ The supervised half of this is ~5 GPU-h; Phase E is the other 70%. Note the
 earlier estimate of ~29 h was measured in `balanced` power profile and under
 contention, understating throughput by ~1.7x — the totals happen to land close
 together, but for unrelated reasons.
+
+## Open decision
+
+**Which trunk to carry into Phase D.** Phase C ruled out the 5-stage variant
+but left a three-way pick (baseline / `[2,2,4,1]` / `[2,2,2,2]` 64-448) that a
+single 15-epoch run can't resolve with confidence — the spread among them
+(1.17 points) is comparable to what one seed change could plausibly move.
+`model.py` was **not** changed while this was open; the graded architecture
+is still the Phase A baseline. Options: (a) accept `[2,2,2,2]` 64-448 on the
+nominal lead, (b) keep the baseline for its 30%-fewer-parameters margin and
+put the saved budget toward Phase D's recipe instead, (c) rerun the top two
+with a second seed before deciding. Needs a call before Phase D locks in a
+trunk to tune the recipe around.
 
 ## Decisions taken
 

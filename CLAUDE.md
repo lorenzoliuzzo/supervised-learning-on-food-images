@@ -11,16 +11,28 @@ grading criterion, not a preference. Any change to `model.py` must keep
 
 ## Layout
 
-- `model.py` — `FoodCNN`, the from-scratch architecture. The only file the
+All source lives under `src/`; nothing but config sits at the repo root.
+
+- `src/model.py` — `FoodCNN`, the from-scratch architecture. The only file the
   parameter budget applies to.
-- `main.py` — training/eval entry point, adapted from the PyTorch ImageNet
+- `src/main.py` — training/eval entry point, adapted from the PyTorch ImageNet
   reference example. Keeps that script's argparse-and-`main_worker` shape on
   purpose; don't restructure it into something else.
-- `resnet.py` — the unmodified PyTorch reference script, kept as a baseline for
-  comparison. **Do not edit it.**
-- `food101.py` — Food-101 side experiments.
+- `src/resnet.py` — the unmodified PyTorch reference script, kept as a baseline
+  for comparison. **Do not edit it.**
+- `src/food101.py` — Food-101 side experiments.
 - `report/` — Typst sources for the report. Don't edit unless the issue says to.
+- `plans/` — dated roadmaps, `YYYY-MM-DD-slug.md`. Update the checkboxes and the
+  `Status:` line of the active plan as work lands, rather than rewriting history.
+  Numbers in a plan must come from a run or a benchmark we actually did.
+- `benchmarks/` — the scripts those numbers come from. If a plan or the report
+  cites a measurement, a benchmark here must reproduce it.
 - `tests/` — pytest.
+
+`src/` is not a package: `pyproject.toml` puts it on `sys.path` via pytest's
+`pythonpath`, so imports stay `from model import FoodCNN` and training runs as
+`python src/main.py`. Benchmarks are standalone scripts and add `src/`
+themselves.
 
 ## Conventions
 

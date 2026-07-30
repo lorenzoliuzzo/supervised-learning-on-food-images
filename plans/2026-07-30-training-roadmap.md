@@ -1,6 +1,6 @@
 # Training roadmap
 
-**Status:** Phases A and B done, Phase C measured (trunk choice open, see below) · **Baseline `main`:** `820f347` · **Last measured:** 2026-07-30
+**Status:** Phases A and B done, Phase C measured (trunk choice open), smoke test converged at 61.57% val-dev top-1 · **Baseline `main`:** `820f347` · **Last measured:** 2026-07-30
 
 Every number here was measured on the project box (RTX 5050 Laptop, 8 GB VRAM,
 16 threads) at 176 px / bf16 / `channels_last`, in `performance` power profile,
@@ -168,6 +168,31 @@ than the new shortcut BNs add back). 17 tests pass, `ruff check .` clean.
       so the four runs above trained with a 64-parameter stem bias none of
       the graded architecture has. Negligible next to the multi-point gaps
       above, not worth rerunning for; future sweeps use the corrected stem.)
+
+## Smoke test — pipeline validated, not a Phase D result
+
+A full 90-epoch run on the unmodified baseline `FoodCNN` (Phase A recipe,
+`--val-subset dev`, no Phase D recipe tuning yet), run to prove the pipeline
+survives full length before spending Phase D's GPU-hours on it. It is not the
+"one 90-epoch run" Phase D calls for — that one happens after the trunk and
+recipe are both decided.
+
+- **Converged at 61.57% val-dev top-1 / 85.67% top-5** (best epoch 82:
+  62.08% / 85.52% — `model_best.pth.tar`, not the final checkpoint, is the
+  one to keep). Up from ~7% at epoch 0, matching the tail-heavy climb the
+  15-epoch proxy already hinted at in §Phase C, and well past both the
+  Food-101-from-scratch loose anchor (mid-50s%) and the proxy's own 47-50%.
+- **No crashes, NaNs, or OOM across the full run.** Checkpointing (regular +
+  best) worked correctly. Peak VRAM 1.99 GiB — still far under the 8 GiB
+  ceiling even at the full 90 epochs.
+- **Wall clock: 2.31 h, not the ~1.8 h estimated in §3.** Per-batch time rose
+  from ~0.16 s early on to ~0.26 s past epoch ~60 (`clocks_event_reasons.active`
+  showed `SW_POWER_CAP` again) — sustained 90-epoch load heat-soaks this
+  laptop GPU more than the short benchmark sweeps in `benchmarks/` ever
+  triggered. The existing power-cap caveat at the top of this file already
+  says to treat throughput figures as an upper bound; this is the concrete
+  case where a full run ran ~28% slower than a synthetic estimate. Phase D's
+  budget should assume real runs, not benchmark rates.
 
 ## Phase D — recipe, then the full run (~4.2 GPU-h)
 

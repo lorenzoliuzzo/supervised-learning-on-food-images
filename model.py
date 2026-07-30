@@ -2,6 +2,31 @@ import torch
 import torch.nn as nn
 
 
+class ResidualBlock(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, stride: int = 1) -> None:
+        super().__init__()
+
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
+        )
+        # Only project the shortcut when the addition would otherwise be shape-mismatched.
+        self.shortcut: nn.Module = (
+            nn.Identity()
+            if in_channels == out_channels and stride == 1
+            else nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride)
+        )
+        # Activation goes after the addition, not inside self.conv: that is what
+        # makes the block a nonlinearity rather than an affine detour.
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.relu(self.conv(x) + self.shortcut(x))
+
+
 class FoodCNN(nn.Module):
     def __init__(self, num_classes: int = 251) -> None:
         super().__init__()
@@ -16,8 +41,8 @@ class FoodCNN(nn.Module):
             self._conv_block_dilated(64, 128),
             nn.MaxPool2d(2, 2),
 
-            # Block 3: Identity Block
-            self._identity_block(128, 128),
+            # Block 3: Residual Block
+            ResidualBlock(128, 128),
             nn.MaxPool2d(2, 2),
 
             # Block 4: Depthwise Separable Convolution
@@ -51,20 +76,6 @@ class FoodCNN(nn.Module):
             nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=2, dilation=2),
             nn.BatchNorm2d(out_channels), # Essential for fast convergence
             nn.ReLU(inplace=True)
-        )
-
-    def _identity_block(self, in_channels: int, out_channels: int) -> nn.Sequential:
-        return nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=1),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
-
-            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=False),
-
-            # identity layer
-            nn.Conv2d(in_channels, out_channels, kernel_size=1)
         )
 
     def _conv_separable_block(self, in_channels: int, out_channels: int) -> nn.Sequential:

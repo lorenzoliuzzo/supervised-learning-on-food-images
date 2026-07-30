@@ -1,14 +1,13 @@
 import argparse
 import os
 import pathlib
-import pandas as pd
 import random
 import shutil
 import time
 import warnings
 from enum import Enum
-from PIL import Image
 
+import pandas as pd
 import torch
 import torch.backends.cudnn as cudnn
 import torch.distributed as dist
@@ -19,12 +18,12 @@ import torch.optim
 import torch.utils.data
 import torch.utils.data.distributed
 import torchvision.transforms as transforms
+from PIL import Image
 from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import Subset
 from torchsummary import summary
 
 from model import FoodCNN
-
 
 parser = argparse.ArgumentParser(description='PyTorch Food251 Training')
 parser.add_argument('data', metavar='DIR', nargs='?', default='foot251',
@@ -223,7 +222,7 @@ def main_worker(gpu, ngpus_per_node, args):
     # optionally resume from a checkpoint
     if args.resume:
         if os.path.isfile(args.resume):
-            print("=> loading checkpoint '{}'".format(args.resume))
+            print(f"=> loading checkpoint '{args.resume}'")
             if args.gpu is None:
                 checkpoint = torch.load(args.resume)
             else:
@@ -241,7 +240,7 @@ def main_worker(gpu, ngpus_per_node, args):
             print("=> loaded checkpoint '{}' (epoch {})"
                   .format(args.resume, checkpoint['epoch']))
         else:
-            print("=> no checkpoint found at '{}'".format(args.resume))
+            print(f"=> no checkpoint found at '{args.resume}'")
 
 
     # Data loading code
@@ -327,7 +326,7 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args):
     progress = ProgressMeter(
         len(train_loader),
         [batch_time, data_time, losses, top1, top5],
-        prefix="Epoch: [{}]".format(epoch))
+        prefix=f"Epoch: [{epoch}]")
 
     # switch to train mode
     model.train()
@@ -446,7 +445,7 @@ class Summary(Enum):
     SUM = 2
     COUNT = 3
 
-class AverageMeter(object):
+class AverageMeter:
     """Computes and stores the average and current value"""
     def __init__(self, name, use_accel, fmt=':f', summary_type=Summary.AVERAGE):
         self.name = name
@@ -492,12 +491,12 @@ class AverageMeter(object):
         elif self.summary_type is Summary.COUNT:
             fmtstr = '{name} {count:.3f}'
         else:
-            raise ValueError('invalid summary type %r' % self.summary_type)
+            raise ValueError(f'invalid summary type {self.summary_type!r}')
         
         return fmtstr.format(**self.__dict__)
 
 
-class ProgressMeter(object):
+class ProgressMeter:
     def __init__(self, num_batches, meters, prefix=""):
         self.batch_fmtstr = self._get_batch_fmtstr(num_batches)
         self.meters = meters

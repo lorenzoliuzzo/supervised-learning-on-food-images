@@ -1,7 +1,32 @@
 [project]
 name = "supervised-learning-on-food-images"
 version = "0.1.0"
-description = "Add your description here"
+description = "A <10M-parameter CNN classifying the 251 classes of the FoodX-251 dataset"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "torch>=2.4",
+    "torchvision>=0.19",
+    "pandas>=2.0",
+    "pillow>=10.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[tool.ruff]
+line-length = 100
+# resnet.py is the upstream PyTorch reference script, kept verbatim as a
+# baseline; linting it would mean editing it.
+exclude = ["resnet.py"]
+
+[tool.ruff.lint]
+# Pinned explicitly: ruff's implicit default set widens between releases, which
+# would turn an unrelated version bump into a red CI.
+select = ["E4", "E7", "E9", "F", "I", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

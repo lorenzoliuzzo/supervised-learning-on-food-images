@@ -1,9 +1,9 @@
 import json
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Optional, Union
+from typing import Any
 
 from .folder import default_loader
-
 from .utils import download_and_extract_archive, verify_str_arg
 from .vision import VisionDataset
 
@@ -37,12 +37,12 @@ class Food101(VisionDataset):
 
     def __init__(
         self,
-        root: Union[str, Path],
+        root: str | Path,
         split: str = "train",
-        transform: Optional[Callable] = None,
-        target_transform: Optional[Callable] = None,
+        transform: Callable | None = None,
+        target_transform: Callable | None = None,
         download: bool = False,
-        loader: Callable[[Union[str, Path]], Any] = default_loader,
+        loader: Callable[[str | Path], Any] = default_loader,
     ) -> None:
         super().__init__(root, transform=transform, target_transform=target_transform)
         self._split = verify_str_arg(split, "split", ("train", "test"))

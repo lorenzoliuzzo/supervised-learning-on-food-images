@@ -1,8 +1,9 @@
 import torch.nn as nn
 
+
 class FoodCNN(nn.Module):
     def __init__(self, num_classes=251):
-        super(FoodCNN, self).__init__()
+        super().__init__()
 
         # We use a modular approach with Batch Normalization
         self.features = nn.Sequential(

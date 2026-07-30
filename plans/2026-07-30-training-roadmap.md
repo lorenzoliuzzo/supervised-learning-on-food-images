@@ -1,6 +1,6 @@
 # Training roadmap
 
-**Status:** Phases A and B done, Phase C measured (trunk choice open), smoke test converged at 61.57% val-dev top-1 · **Baseline `main`:** `820f347` · **Last measured:** 2026-07-30
+**Status:** Phases A, B, C done; smoke test converged at 61.57% val-dev top-1; trunk decided (baseline, provisional); Phase D not started · **Baseline `main`:** `820f347` · **Last measured:** 2026-07-30
 
 Every number here was measured on the project box (RTX 5050 Laptop, 8 GB VRAM,
 16 threads) at 176 px / bf16 / `channels_last`, in `performance` power profile,
@@ -252,25 +252,24 @@ earlier estimate of ~29 h was measured in `balanced` power profile and under
 contention, understating throughput by ~1.7x — the totals happen to land close
 together, but for unrelated reasons.
 
-## Open decision
-
-**Which trunk to carry into Phase D.** Phase C ruled out the 5-stage variant
-but left a three-way pick (baseline / `[2,2,4,1]` / `[2,2,2,2]` 64-448) that a
-single 15-epoch run can't resolve with confidence — the spread among them
-(1.17 points) is comparable to what one seed change could plausibly move.
-`model.py` was **not** changed while this was open; the graded architecture
-is still the Phase A baseline. Options: (a) accept `[2,2,2,2]` 64-448 on the
-nominal lead, (b) keep the baseline for its 30%-fewer-parameters margin and
-put the saved budget toward Phase D's recipe instead, (c) rerun the top two
-with a second seed before deciding. Needs a call before Phase D locks in a
-trunk to tune the recipe around.
-
 ## Decisions taken
 
 - **Val split: 50/50 stratified `val-dev` / `val-test`.** Model selection never
   touches `val-test`; the report quotes it once.
 - **SSL scope: the full setting, 200 epochs at 176 px**, with the
   equal-GPU-hours supervised control.
+- **Trunk for Phase D: the baseline `[2,2,2,1]` 64-512, provisionally.**
+  Phase C ruled out the 5-stage variant but left baseline / `[2,2,4,1]` /
+  `[2,2,2,2]` 64-448 within 1.17 points on a single seed each — not enough
+  to call with confidence. Going with the baseline because it's statistically
+  indistinguishable from the other two here, uses 30% fewer parameters, and
+  that headroom hasn't measured as worth anything yet; better spent on Phase
+  D's recipe tuning. `model.py` needs no change — the baseline is already
+  what's there. **Explicitly revisitable**: if the Phase D-tuned baseline
+  underperforms expectations, `[2,2,4,1]` and `[2,2,2,2]` 64-448 are still
+  defined in `benchmarks/trunk_variants.VARIANTS` and can be re-proxied (or
+  re-run with a second seed, per the option not taken here) without redoing
+  any of the measurement work above.
 
 Both were settled on 2026-07-30. Reopen them here rather than silently
 diverging in code.

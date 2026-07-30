@@ -24,3 +24,8 @@ articles/
 *.pth.tar
 runs/
 checkpoints/
+
+# Deterministic from food251/meta/val_labels.csv + a fixed seed (see
+# src/make_val_split.py) -- regenerate locally rather than committing a
+# 12k-row CSV that's fully reproducible from a one-line command.
+splits/

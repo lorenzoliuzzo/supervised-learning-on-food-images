@@ -115,14 +115,16 @@ than the new shortcut BNs add back). 17 tests pass, `ruff check .` clean.
 - [x] **Split the 11,994-image val set 50/50, stratified, into `val-dev` and
       `val-test`** (decided). Ablations and checkpoint selection read `val-dev`
       only; `val-test` is touched once, for the report's headline number. Without
-      this the headline is selected-on. The split is generated from a fixed seed
-      and committed as a file, not recomputed per run — a split that drifts is
-      worse than no split. (4 classes have <20 val images and 1 has 2; those
-      per-class numbers stay noisy either way.)
-      Implemented in `src/make_val_split.py` (per-class shuffle-and-halve, seed
-      251), output committed at `splits/val_split.csv`: every one of the 251
-      classes lands within 1 image of an exact 50/50 split (6,063 dev / 5,931
-      test).
+      this the headline is selected-on. The split must not drift between runs —
+      every one of the 251 classes lands within 1 image of an exact 50/50 split
+      (6,063 dev / 5,931 test).
+      Implemented in `src/make_val_split.py` (per-class shuffle-and-halve, fixed
+      seed 251) as a pure function of `food251/meta/val_labels.csv`, so it's
+      byte-identical on every regeneration — that determinism is what replaces
+      committing the output: `splits/val_split.csv` is gitignored (12k rows,
+      no information not already in the dataset + one seed), regenerate with
+      `python src/make_val_split.py` before the first training run on a fresh
+      checkout.
 - [x] **Fixed seed and a fixed 15-epoch proxy protocol** for every comparison.
       At ~1.2 min/epoch a proxy run is ~18 minutes, so comparisons that would be
       unaffordable at 90 epochs are routine. Rank on the proxy, confirm once at

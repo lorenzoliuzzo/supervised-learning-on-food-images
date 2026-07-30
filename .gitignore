@@ -11,8 +11,10 @@ wheels/
 
 data
 
-# FoodX-251 dataset (~5.5 GB, downloaded separately)
-food251/
+# FoodX-251 dataset (~5.5 GB, downloaded separately). No trailing slash: this
+# worktree symlinks food251 -> the dataset in the main checkout, and gitignore's
+# directory-only `food251/` form does not match a symlink.
+food251
 
 # Third-party papers, not ours to redistribute
 articles/

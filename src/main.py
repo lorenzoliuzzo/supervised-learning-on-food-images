@@ -25,6 +25,7 @@ from torch.utils.data import Subset
 from torchsummary import summary
 
 from model import FoodCNN
+from runlog import RunLog
 
 parser = argparse.ArgumentParser(description='PyTorch Food251 Training')
 parser.add_argument('data', metavar='DIR', nargs='?', default='food251',
@@ -72,15 +73,30 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'N processes per node, which has N GPUs. This is the '
                          'fastest way to use PyTorch for either single node or '
                          'multi node data parallel training')
+parser.add_argument('--val-split', default='splits/val_split.csv', type=str,
+                    help='path to the committed val-dev/val-test split (default: '
+                         'splits/val_split.csv); ignored if the file does not exist')
+parser.add_argument('--val-subset', default='dev', choices=['dev', 'test', 'all'],
+                    help='which half of the val split to evaluate against '
+                         '(default: dev). val-test is touched once, for the '
+                         "report's headline number -- pass --val-subset test only then")
+parser.add_argument('--run-label', default='run', type=str,
+                    help='human-readable tag for this run, used in the log filename')
+parser.add_argument('--log-dir', default='runs', type=str,
+                    help='directory per-run JSON logs are written to')
 
 
 class FoodX251Dataset(torch.utils.data.Dataset):
-    def __init__(self, image_dir, label_file, transform=None):
+    def __init__(self, image_dir, label_file, transform=None, subset=None):
         self.image_dir = pathlib.Path(image_dir)
         self.transform = transform
-        
+
         # Load CSV and cast types to save memory
         df = pd.read_csv(label_file)
+        # `subset`, when given, keeps only the named images -- this is how
+        # val-dev/val-test read the same directory and CSV but stay disjoint.
+        if subset is not None:
+            df = df[df.iloc[:, 0].isin(subset)]
         self.image_names = df.iloc[:, 0].tolist()
         # Ensure labels are explicitly 32-bit integers to save space over 64-bit
         self.labels = df.iloc[:, 1].astype('int32').tolist()
@@ -109,6 +125,19 @@ def dataset_paths(
     train = (root / 'train_set', root / 'meta' / 'train_labels.csv')
     val = (root / 'val_set', root / 'meta' / 'val_labels.csv')
     return train, val
+
+
+def load_val_split(split_path: str | pathlib.Path, name: str) -> set[str] | None:
+    # Returns None for 'all' or a missing split file so callers can fall back
+    # to the unfiltered val set without a special case at every call site.
+    if name == 'all':
+        return None
+    path = pathlib.Path(split_path)
+    if not path.exists():
+        warnings.warn(f"val split file not found at '{path}', evaluating against the full val set")
+        return None
+    df = pd.read_csv(path)
+    return set(df.loc[df['split'] == name, 'img_name'])
 
 
 WARMUP_EPOCHS = 5
@@ -233,6 +262,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
     if device.type == 'cuda':
         model = model.to(memory_format=torch.channels_last)
+        torch.cuda.reset_peak_memory_stats()
 
     summary(model, input_size=(3, 224, 224))
 
@@ -289,6 +319,7 @@ def main_worker(gpu, ngpus_per_node, args):
         ])
     )
 
+    val_subset = load_val_split(args.val_split, args.val_subset)
     val_dataset = FoodX251Dataset(
         val_dir,
         val_labels,
@@ -297,7 +328,8 @@ def main_worker(gpu, ngpus_per_node, args):
             transforms.CenterCrop(224),
             transforms.ToTensor(),
             normalize,
-        ])
+        ]),
+        subset=val_subset,
     )
 
     if args.distributed:
@@ -319,18 +351,22 @@ def main_worker(gpu, ngpus_per_node, args):
         validate(val_loader, model, criterion, args)
         return
 
+    run = RunLog(label=args.run_label, config=vars(args) | {'val_subset_size': len(val_dataset)})
+
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
 
         # train for one epoch
-        train(train_loader, model, criterion, optimizer, epoch, device, args)
+        train_loss, train_acc1, train_acc5 = train(
+            train_loader, model, criterion, optimizer, epoch, device, args)
 
         # evaluate on validation set
-        acc1 = validate(val_loader, model, criterion, args)
-        
+        acc1, acc5 = validate(val_loader, model, criterion, args)
+        run.record(epoch, train_loss, train_acc1, train_acc5, acc1, acc5)
+
         scheduler.step()
-        
+
         # remember best acc@1 and save checkpoint
         is_best = acc1 > best_acc1
         best_acc1 = max(acc1, best_acc1)
@@ -344,6 +380,10 @@ def main_worker(gpu, ngpus_per_node, args):
                 'optimizer' : optimizer.state_dict(),
                 'scheduler' : scheduler.state_dict()
             }, is_best)
+
+    peak_vram_gib = torch.cuda.max_memory_allocated() / 2**30 if device.type == 'cuda' else 0.0
+    log_path = run.save(pathlib.Path(args.log_dir), peak_vram_gib=peak_vram_gib)
+    print(f"=> wrote run log to '{log_path}'")
 
 
 def train(train_loader, model, criterion, optimizer, epoch, device, args):
@@ -398,6 +438,8 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args):
 
         if i % args.print_freq == 0:
             progress.display(i + 1)
+
+    return losses.avg, float(top1.avg), float(top5.avg)
 
 
 def validate(val_loader, model, criterion, args):
@@ -471,7 +513,7 @@ def validate(val_loader, model, criterion, args):
 
     progress.display_summary()
 
-    return top1.avg
+    return float(top1.avg), float(top5.avg)
 
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):

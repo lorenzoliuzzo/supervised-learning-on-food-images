@@ -1,4 +1,5 @@
 import argparse
+import math
 import os
 import pathlib
 import random
@@ -19,7 +20,7 @@ import torch.utils.data
 import torch.utils.data.distributed
 import torchvision.transforms as transforms
 from PIL import Image
-from torch.optim.lr_scheduler import StepLR
+from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import Subset
 from torchsummary import summary
 
@@ -28,8 +29,8 @@ from model import FoodCNN
 parser = argparse.ArgumentParser(description='PyTorch Food251 Training')
 parser.add_argument('data', metavar='DIR', nargs='?', default='food251',
                     help='path to dataset (default: food251)')
-parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
-                    help='number of data loading workers (default: 4)')
+parser.add_argument('-j', '--workers', default=8, type=int, metavar='N',
+                    help='number of data loading workers (default: 8)')
 parser.add_argument('--epochs', default=90, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
@@ -108,6 +109,19 @@ def dataset_paths(
     train = (root / 'train_set', root / 'meta' / 'train_labels.csv')
     val = (root / 'val_set', root / 'meta' / 'val_labels.csv')
     return train, val
+
+
+WARMUP_EPOCHS = 5
+
+
+def warmup_cosine_lr(epoch: int, epochs: int, warmup_epochs: int = WARMUP_EPOCHS) -> float:
+    # Zero-init gamma (see model.py) makes a high LR safe once warmup has run,
+    # but not from step 0 -- linear warmup covers that gap, then cosine decays
+    # to ~0 so the last epochs fine-tune rather than keep bouncing.
+    if epoch < warmup_epochs:
+        return (epoch + 1) / warmup_epochs
+    progress = (epoch - warmup_epochs) / max(1, epochs - warmup_epochs)
+    return 0.5 * (1 + math.cos(math.pi * progress))
 
 
 best_acc1 = 0
@@ -211,22 +225,29 @@ def main_worker(gpu, ngpus_per_node, args):
                 # available GPUs if device_ids are not set
                 model = torch.nn.parallel.DistributedDataParallel(model)
     elif device.type == 'cuda':
-        # DataParallel will divide and allocate batch_size to all available GPUs
-        model = torch.nn.DataParallel(model).cuda()
+        # Single GPU on this box: DataParallel would add a scatter/gather per
+        # step and prefix every checkpoint key with `module.` for no benefit.
+        model.cuda()
     else:
         model.to(device)
+
+    if device.type == 'cuda':
+        model = model.to(memory_format=torch.channels_last)
 
     summary(model, input_size=(3, 224, 224))
 
     # define loss function (criterion), optimizer, and learning rate scheduler
-    criterion = nn.CrossEntropyLoss().to(device)
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1).to(device)
 
     optimizer = torch.optim.SGD(model.parameters(), args.lr,
                                 momentum=args.momentum,
-                                weight_decay=args.weight_decay)
-    
-    """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
-    scheduler = StepLR(optimizer, step_size=30, gamma=0.1)
+                                weight_decay=args.weight_decay,
+                                nesterov=True)
+
+    # Linear warmup into a cosine decay, not StepLR(30, 0.1): the zero-init
+    # residual gammas need warmup to be safe at a high LR, and a smooth decay
+    # suits the length of the runs this trains for (see warmup_cosine_lr).
+    scheduler = LambdaLR(optimizer, lr_lambda=lambda epoch: warmup_cosine_lr(epoch, args.epochs))
     
     # optionally resume from a checkpoint
     if args.resume:
@@ -261,7 +282,7 @@ def main_worker(gpu, ngpus_per_node, args):
         train_dir,
         train_labels,
         transforms.Compose([
-            transforms.RandomResizedCrop(224),
+            transforms.RandomResizedCrop(176),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             normalize,
@@ -350,10 +371,15 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args):
         # move data to the same device as model
         images = images.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
+        if device.type == 'cuda':
+            images = images.to(memory_format=torch.channels_last)
 
         # compute output
-        output = model(images)
-        loss = criterion(output, target)
+        # bf16 needs no GradScaler: unlike fp16 its exponent range already
+        # covers gradient magnitudes, so the scaler would be pure overhead.
+        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == 'cuda'):
+            output = model(images)
+            loss = criterion(output, target)
 
         # measure accuracy and record loss
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
@@ -397,10 +423,13 @@ def validate(val_loader, model, criterion, args):
                     else:
                         images = images.to(device)
                         target = target.to(device)
+                    if device.type == 'cuda':
+                        images = images.to(memory_format=torch.channels_last)
 
                 # compute output
-                output = model(images)
-                loss = criterion(output, target)
+                with torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == 'cuda'):
+                    output = model(images)
+                    loss = criterion(output, target)
 
                 # measure accuracy and record loss
                 acc1, acc5 = accuracy(output, target, topk=(1, 5))

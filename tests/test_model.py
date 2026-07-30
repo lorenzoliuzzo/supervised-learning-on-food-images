@@ -29,7 +29,6 @@ def test_residual_block_adds_shortcut_when_conv_path_is_zeroed() -> None:
     last_conv = block.conv[-2]
     assert isinstance(last_conv, nn.Conv2d)
     nn.init.zeros_(last_conv.weight)
-    nn.init.zeros_(last_conv.bias)
 
     block.eval()
     x = torch.randn(2, 128, 8, 8)

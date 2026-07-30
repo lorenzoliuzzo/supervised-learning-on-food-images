@@ -66,6 +66,35 @@ def top_confused_pairs(
     return pairs
 
 
+def symmetric_confusion_candidates(
+    confusion: np.ndarray, class_names: list[str], *, min_rate: float = 0.1, n: int = 20
+) -> list[tuple[str, str, int, int, float]]:
+    # A class genuinely confused for another usually confuses one way more
+    # than the other -- spring roll -> egg roll far more than the reverse.
+    # Two classes that are actually the same food under different names (a
+    # dataset labeling issue, not a model failure) confuse roughly
+    # symmetrically in both directions, which top_confused_pairs' single-
+    # direction ranking can't distinguish from an ordinary one-way mix-up.
+    # Requires nonzero counts in *both* directions, not just a high combined
+    # rate, to rule out one-sided confusion inflating the score.
+    support = confusion.sum(axis=1)
+    num_classes = len(class_names)
+    candidates = []
+    for i in range(num_classes):
+        for j in range(i + 1, num_classes):
+            a_to_b, b_to_a = int(confusion[i, j]), int(confusion[j, i])
+            if a_to_b == 0 or b_to_a == 0:
+                continue
+            total_support = support[i] + support[j]
+            if total_support == 0:
+                continue
+            rate = (a_to_b + b_to_a) / total_support
+            if rate >= min_rate:
+                candidates.append((class_names[i], class_names[j], a_to_b, b_to_a, rate))
+    candidates.sort(key=lambda c: -c[4])
+    return candidates[:n]
+
+
 def per_class_accuracy(confusion: np.ndarray) -> np.ndarray:
     row_sums = confusion.sum(axis=1)
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -226,11 +255,28 @@ def main() -> None:
     for true_name, pred_name, count in pairs:
         print(f"  {true_name:30s} -> {pred_name:30s}  {count}")
 
+    # Confused in both directions at a high rate suggests the two labels may
+    # be the same food under different names -- a dataset issue, not
+    # something more epochs or a different recipe can fix.
+    duplicate_candidates = symmetric_confusion_candidates(confusion, class_names, n=args.top_n)
+    pd.DataFrame(duplicate_candidates,
+                 columns=["class_a", "class_b", "a_to_b", "b_to_a", "symmetric_rate"]).to_csv(
+        args.out / "possible_duplicate_classes.csv", index=False)
+    if duplicate_candidates:
+        print(f"\n{len(duplicate_candidates)} possible near-duplicate classes "
+              "(confused both ways, rate = combined confusions / combined support):")
+        for class_a, class_b, a_to_b, b_to_a, rate in duplicate_candidates:
+            print(f"  {class_a:30s} <-> {class_b:30s}  {a_to_b}/{b_to_a}  ({rate * 100:.1f}%)")
+
+    pd.DataFrame(confusion, index=class_names, columns=class_names).to_csv(
+        args.out / "confusion_matrix.csv")
+
     plot_worst_classes(accuracy, class_names, args.out / "worst_classes.png")
     plot_confidence_histogram(result["confidences"], correct, args.out / "confidence_histogram.png")
     plot_tsne(result["features"], correct, args.out / "tsne.png",
               samples=args.tsne_samples, seed=args.seed)
-    print(f"\nwrote classification_report.csv, top_confused_pairs.csv and 3 plots to {args.out}")
+    print(f"\nwrote classification_report.csv, top_confused_pairs.csv, "
+          f"possible_duplicate_classes.csv, confusion_matrix.csv and 3 plots to {args.out}")
 
 
 if __name__ == "__main__":

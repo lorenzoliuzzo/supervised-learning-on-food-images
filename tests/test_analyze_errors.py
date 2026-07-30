@@ -10,6 +10,7 @@ from analyze_errors import (
     plot_tsne,
     plot_worst_classes,
     run_inference,
+    symmetric_confusion_candidates,
     top_confused_pairs,
 )
 from torch.utils.data import DataLoader, TensorDataset
@@ -52,6 +53,49 @@ def test_top_confused_pairs_respects_n() -> None:
 
     assert len(pairs) == 2
     assert pairs[0][2] == 5  # sorted descending by count
+
+
+def test_symmetric_confusion_requires_both_directions_nonzero() -> None:
+    # "a" is confused for "b" a lot, but "b" is never confused for "a" --
+    # that's an ordinary one-way mix-up (e.g. a common class as a catch-all
+    # wrong answer), not evidence the two labels are the same thing.
+    confusion = np.array([
+        [0, 20, 0],
+        [0, 10, 0],
+        [0, 0, 10],
+    ])
+    candidates = symmetric_confusion_candidates(confusion, ["a", "b", "c"], min_rate=0.01)
+
+    assert candidates == []
+
+
+def test_symmetric_confusion_flags_a_genuine_two_way_pair() -> None:
+    # "a" and "b" are confused for each other at a high, roughly symmetric
+    # rate -- the signature of a possible near-duplicate class, distinct
+    # from top_confused_pairs' one-directional ranking.
+    confusion = np.array([
+        [5, 8, 0],
+        [7, 5, 0],
+        [0, 0, 20],
+    ])
+    candidates = symmetric_confusion_candidates(confusion, ["a", "b", "c"], min_rate=0.1)
+
+    assert len(candidates) == 1
+    class_a, class_b, a_to_b, b_to_a, rate = candidates[0]
+    assert {class_a, class_b} == {"a", "b"}
+    assert {a_to_b, b_to_a} == {8, 7}
+    assert rate == pytest.approx(15 / 25)
+
+
+def test_symmetric_confusion_respects_min_rate() -> None:
+    confusion = np.array([
+        [90, 1, 0],
+        [1, 90, 0],
+        [0, 0, 20],
+    ])
+    candidates = symmetric_confusion_candidates(confusion, ["a", "b", "c"], min_rate=0.5)
+
+    assert candidates == []
 
 
 def test_per_class_accuracy_matches_manual_computation() -> None:

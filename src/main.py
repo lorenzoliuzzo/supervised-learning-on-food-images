@@ -23,6 +23,7 @@ from PIL import Image
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import Subset
 from torchsummary import summary
+from torchvision.transforms import v2
 
 from model import FoodCNN
 from runlog import RunLog
@@ -84,6 +85,22 @@ parser.add_argument('--run-label', default='run', type=str,
                     help='human-readable tag for this run, used in the log filename')
 parser.add_argument('--log-dir', default='runs', type=str,
                     help='directory per-run JSON logs are written to')
+parser.add_argument('--augment', default='none', choices=['none', 'trivial', 'rand'],
+                    help='extra train-time augmentation policy on top of crop+flip '
+                         '(default: none)')
+parser.add_argument('--mix', default='none', choices=['none', 'mixup', 'cutmix'],
+                    help='batch-level Mixup/CutMix regularization (default: none)')
+parser.add_argument('--ema', action='store_true',
+                    help='track an exponential moving average of weights and '
+                         'validate against it instead of the raw weights')
+parser.add_argument('--ema-decay', default=0.999, type=float,
+                    help='EMA decay rate (default: 0.999)')
+parser.add_argument('--loss', default='ce', choices=['ce', 'gce'],
+                    help='training loss: label-smoothed cross-entropy, or GCE for '
+                         'label noise robustness (default: ce)')
+parser.add_argument('--gce-q', default=0.7, type=float,
+                    help='GCE q in (0, 1]: lower is closer to CE, higher is more '
+                         'noise-robust (default: 0.7, per Zhang & Sabuncu 2018)')
 
 
 class FoodX251Dataset(torch.utils.data.Dataset):
@@ -127,6 +144,22 @@ def dataset_paths(
     return train, val
 
 
+def build_train_transform(augment: str, normalize: transforms.Normalize) -> transforms.Compose:
+    # TrivialAugment/RandAugment operate on the PIL image, so they slot in
+    # after the geometric transforms and before ToTensor -- not appended, or
+    # they'd run on an already-normalized tensor.
+    pipeline: list[object] = [
+        transforms.RandomResizedCrop(176),
+        transforms.RandomHorizontalFlip(),
+    ]
+    if augment == 'trivial':
+        pipeline.append(transforms.TrivialAugmentWide())
+    elif augment == 'rand':
+        pipeline.append(transforms.RandAugment())
+    pipeline += [transforms.ToTensor(), normalize]
+    return transforms.Compose(pipeline)
+
+
 def load_val_split(split_path: str | pathlib.Path, name: str) -> set[str] | None:
     # Returns None for 'all' or a missing split file so callers can fall back
     # to the unfiltered val set without a special case at every call site.
@@ -151,6 +184,24 @@ def warmup_cosine_lr(epoch: int, epochs: int, warmup_epochs: int = WARMUP_EPOCHS
         return (epoch + 1) / warmup_epochs
     progress = (epoch - warmup_epochs) / max(1, epochs - warmup_epochs)
     return 0.5 * (1 + math.cos(math.pi * progress))
+
+
+class GeneralizedCrossEntropyLoss(nn.Module):
+    # Zhang & Sabuncu, "Generalized Cross Entropy Loss for Training Deep
+    # Neural Networks with Noisy Labels" (2018): L_q = (1 - p_y^q) / q, which
+    # interpolates between CE (q -> 0) and MAE (q = 1). MAE-like losses give
+    # a mislabeled-but-confident example a bounded gradient instead of CE's
+    # unbounded one, trading slower convergence on clean examples for less
+    # damage from wrong ones -- the trade this dataset's web-crawled train
+    # labels make worth testing.
+    def __init__(self, q: float = 0.7) -> None:
+        super().__init__()
+        self.q = q
+
+    def forward(self, output: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        probs = torch.softmax(output, dim=1)
+        p_y = probs.gather(1, target.unsqueeze(1)).squeeze(1).clamp(min=1e-7)
+        return ((1 - p_y.pow(self.q)) / self.q).mean()
 
 
 best_acc1 = 0
@@ -267,7 +318,10 @@ def main_worker(gpu, ngpus_per_node, args):
     summary(model, input_size=(3, 224, 224))
 
     # define loss function (criterion), optimizer, and learning rate scheduler
-    criterion = nn.CrossEntropyLoss(label_smoothing=0.1).to(device)
+    if args.loss == 'gce':
+        criterion = GeneralizedCrossEntropyLoss(q=args.gce_q).to(device)
+    else:
+        criterion = nn.CrossEntropyLoss(label_smoothing=0.1).to(device)
 
     optimizer = torch.optim.SGD(model.parameters(), args.lr,
                                 momentum=args.momentum,
@@ -278,6 +332,14 @@ def main_worker(gpu, ngpus_per_node, args):
     # residual gammas need warmup to be safe at a high LR, and a smooth decay
     # suits the length of the runs this trains for (see warmup_cosine_lr).
     scheduler = LambdaLR(optimizer, lr_lambda=lambda epoch: warmup_cosine_lr(epoch, args.epochs))
+
+    # use_buffers=False (the default) means BatchNorm running stats are
+    # copied straight from `model`, not averaged -- only the learnable
+    # weights get smoothed, so the EMA model's BN statistics stay live and
+    # need no separate recalibration pass after training.
+    ema_model = torch.optim.swa_utils.AveragedModel(
+        model, multi_avg_fn=torch.optim.swa_utils.get_ema_multi_avg_fn(args.ema_decay)
+    ) if args.ema else None
     
     # optionally resume from a checkpoint
     if args.resume:
@@ -311,12 +373,7 @@ def main_worker(gpu, ngpus_per_node, args):
     train_dataset = FoodX251Dataset(
         train_dir,
         train_labels,
-        transforms.Compose([
-            transforms.RandomResizedCrop(176),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            normalize,
-        ])
+        build_train_transform(args.augment, normalize)
     )
 
     val_subset = load_val_split(args.val_split, args.val_subset)
@@ -353,16 +410,21 @@ def main_worker(gpu, ngpus_per_node, args):
 
     run = RunLog(label=args.run_label, config=vars(args) | {'val_subset_size': len(val_dataset)})
 
+    # The EMA weights are what gets evaluated and checkpointed once enabled --
+    # the whole point of EMA is that the smoothed weights are the ones worth
+    # keeping, not a diagnostic alongside the raw ones.
+    eval_model = ema_model if ema_model is not None else model
+
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
 
         # train for one epoch
         train_loss, train_acc1, train_acc5 = train(
-            train_loader, model, criterion, optimizer, epoch, device, args)
+            train_loader, model, criterion, optimizer, epoch, device, args, ema_model=ema_model)
 
         # evaluate on validation set
-        acc1, acc5 = validate(val_loader, model, criterion, args)
+        acc1, acc5 = validate(val_loader, eval_model, criterion, args)
         run.record(epoch, train_loss, train_acc1, train_acc5, acc1, acc5)
 
         scheduler.step()
@@ -373,20 +435,24 @@ def main_worker(gpu, ngpus_per_node, args):
 
         if not args.multiprocessing_distributed or (args.multiprocessing_distributed
                 and args.rank % ngpus_per_node == 0):
+            # ema_model.state_dict() would carry a `module.` prefix and an
+            # `n_averaged` buffer neither FoodCNN nor --resume expects;
+            # `.module` unwraps AveragedModel back to a plain state dict.
+            save_state = ema_model.module.state_dict() if ema_model is not None else model.state_dict()
             save_checkpoint({
                 'epoch': epoch + 1,
-                'state_dict': model.state_dict(),
+                'state_dict': save_state,
                 'best_acc1': best_acc1,
                 'optimizer' : optimizer.state_dict(),
                 'scheduler' : scheduler.state_dict()
-            }, is_best)
+            }, is_best, filename=f'checkpoints/{args.run_label}.pth.tar')
 
     peak_vram_gib = torch.cuda.max_memory_allocated() / 2**30 if device.type == 'cuda' else 0.0
     log_path = run.save(pathlib.Path(args.log_dir), peak_vram_gib=peak_vram_gib)
     print(f"=> wrote run log to '{log_path}'")
 
 
-def train(train_loader, model, criterion, optimizer, epoch, device, args):
+def train(train_loader, model, criterion, optimizer, epoch, device, args, ema_model=None):
     
     use_accel = not args.no_accel and torch.accelerator.is_available()
 
@@ -399,6 +465,12 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args):
         len(train_loader),
         [batch_time, data_time, losses, top1, top5],
         prefix=f"Epoch: [{epoch}]")
+
+    mixer = None
+    if args.mix == 'mixup':
+        mixer = v2.MixUp(num_classes=251)
+    elif args.mix == 'cutmix':
+        mixer = v2.CutMix(num_classes=251)
 
     # switch to train mode
     model.train()
@@ -414,6 +486,13 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args):
         if device.type == 'cuda':
             images = images.to(memory_format=torch.channels_last)
 
+        # Mixup/CutMix replace target with a soft label over the whole batch,
+        # so there is no single "correct" class left to score top-1/top-5
+        # against -- accuracy is reported against the true label instead.
+        hard_target = target
+        if mixer is not None:
+            images, target = mixer(images, target)
+
         # compute output
         # bf16 needs no GradScaler: unlike fp16 its exponent range already
         # covers gradient magnitudes, so the scaler would be pure overhead.
@@ -422,7 +501,7 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args):
             loss = criterion(output, target)
 
         # measure accuracy and record loss
-        acc1, acc5 = accuracy(output, target, topk=(1, 5))
+        acc1, acc5 = accuracy(output, hard_target, topk=(1, 5))
         losses.update(loss.item(), images.size(0))
         top1.update(acc1[0], images.size(0))
         top5.update(acc5[0], images.size(0))
@@ -431,6 +510,8 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args):
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+        if ema_model is not None:
+            ema_model.update_parameters(model)
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -516,10 +597,11 @@ def validate(val_loader, model, criterion, args):
     return float(top1.avg), float(top5.avg)
 
 
-def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
+def save_checkpoint(state, is_best, filename):
+    pathlib.Path(filename).parent.mkdir(parents=True, exist_ok=True)
     torch.save(state, filename)
     if is_best:
-        shutil.copyfile(filename, 'model_best.pth.tar')
+        shutil.copyfile(filename, str(filename).replace('.pth.tar', '-best.pth.tar'))
 
 class Summary(Enum):
     NONE = 0

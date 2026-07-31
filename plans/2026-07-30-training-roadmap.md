@@ -1,6 +1,6 @@
 # Training roadmap
 
-**Status:** Phases A, B, C done; smoke test converged at 61.57% val-dev top-1; trunk decided (baseline, provisional); Phase D LR search done (lr=0.8, 55.58% val-dev top-1); recipe proxies (aug/mixup/EMA/noise-loss) not run yet · **Baseline `main`:** `820f347` · **Last measured:** 2026-07-30
+**Status:** Phases A, B, C done; smoke test converged at 61.57% val-dev top-1; trunk decided (baseline, provisional); Phase D recipe search done — lr=0.8, plain recipe (no augmentation/Mixup/CutMix/EMA) carries forward, nothing tested beat it (see Phase D for the matched-epoch rematch and why GCE/EMA's poor showings aren't final verdicts); batch-size sweep and the single 90-epoch full run are next · **Baseline `main`:** `820f347` · **Last measured:** 2026-07-31
 
 Every number here was measured on the project box (RTX 5050 Laptop, 8 GB VRAM,
 16 threads) at 176 px / bf16 / `channels_last`, in `performance` power profile,
@@ -229,8 +229,113 @@ recipe are both decided.
       reward plus growing noise flips the risk/reward; **0.8 is the LR
       Phase D carries forward.**
 
-      TrivialAugment/RandAugment/Mixup/CutMix/EMA proxies not run yet — the
-      code landed (see "Decisions taken") but the sweep hasn't.
+      **Augmentation, 15-epoch proxy (baseline trunk, lr=0.8, batch 256):**
+
+      | Recipe | val-dev top-1 | top-3 | top-5 |
+      | --- | --- | --- | --- |
+      | none (control) | **55.58%** | 74.75% | 81.40% |
+      | TrivialAugment | 52.09% | 72.24% | 79.71% |
+      | RandAugment | 52.60% | 72.84% | 79.93% |
+
+      Both augmentation policies land ~3 points *below* the no-augmentation
+      control at 15 epochs, TrivialAugment and RandAugment effectively tied
+      with each other. Checked whether this is a top-1-only illusion —
+      `benchmarks/analyze_errors.py` against all three checkpoints, not just
+      the headline number — and it isn't at this proxy length: control leads
+      on macro-F1 (53.38% vs 49.63%/50.22%), weighted-F1, and the
+      worst-30-classes average (16.77% vs 14.05%/14.78%), so augmentation
+      isn't quietly buying rare-class recall at the cost of overall accuracy
+      here. Calibration (15-bin ECE) is a wash across all three. One thing
+      the deep-dive did confirm as real rather than a fluke: the same
+      near-duplicate class pairs (beef tartare/steak tartare, chicken
+      wing/buffalo wing, oyster/huitre, ...) turn up under all three
+      training recipes — cross-validates that those are dataset labeling
+      collisions, not an artifact of one run.
+
+      But at epoch 15 both augmented runs' train loss was still meaningfully
+      above the control's (3.32-3.43 vs 3.02) — still mid-convergence — so
+      the 15-epoch protocol was suspected of being too short for
+      augmentation to pay off. **Resolved with a matched-epoch rematch:**
+      no-augmentation and RandAugment both re-run fresh for 30 epochs
+      (cosine schedule needs the total epoch count set upfront, so this
+      could not be a resume of the 15-epoch checkpoints):
+
+      | Recipe (30ep) | val-dev top-1 | macro-F1 | weighted-F1 | worst-30 avg | ECE |
+      | --- | --- | --- | --- | --- | --- |
+      | none (control) | **61.27%** | **59.38%** | **60.90%** | **23.62%** | 0.144 |
+      | RandAugment | 60.43% | 58.31% | 59.84% | 23.21% | 0.157 |
+
+      The 15-epoch proxy exaggerated the gap in *magnitude* (~3 points) but
+      not in *direction*: at matched epochs the gap narrows to 0.84 points,
+      and control still wins on every axis in the deep-dive, calibration
+      included. Conclusion: **RandAugment is not worth its complexity at
+      this schedule length**, but the margin is close enough that it's
+      worth re-checking if the eventual full run's length or LR changes
+      materially.
+
+      *Incident, 2026-07-31:* the worktree running the first 30-epoch
+      RandAugment attempt was recycled mid-training (session-level infra,
+      not a code bug), which deleted its gitignored `runs/`/`checkpoints/`
+      along with the dataset symlink the run was reading from — it crashed
+      on its final epoch with `FileNotFoundError`. The per-epoch curve
+      survived in an out-of-worktree scratchpad and was reconstructed into
+      `runs/phaseD/reconstructed-*.json` (flagged `"reconstructed": true`;
+      val metrics exact, train metrics are the epoch's last running average
+      rather than the true epoch mean — kept for the record, not used
+      above). No checkpoint survived that attempt, so it was re-run clean
+      for the table above. All Phase D work now runs from the main checkout
+      (`/home/lollinux/life/supervised-learning-on-food-images`), not a
+      worktree, so a recycle can't repeat this.
+
+      **Mixup / CutMix / EMA / GCE loss, 15-epoch proxy** (same protocol,
+      against the 15-epoch control above — these were not extended to 30
+      epochs; see reasoning per-row):
+
+      | Recipe | val-dev top-1 | macro-F1 | worst-30 avg | zero-acc classes | ECE |
+      | --- | --- | --- | --- | --- | --- |
+      | none (control, 15ep) | 55.58% | 53.38% | 16.77% | 4 | 0.182 |
+      | Mixup | 42.95% | 40.05% | 5.13% | 11 | 0.231 |
+      | CutMix | 48.84% | 45.61% | 7.19% | 5 | 0.172 |
+      | EMA (decay 0.999) | 39.88% | 38.32% | 4.52% | 9 | 0.107 |
+      | GCE loss (q=0.7) | 22.23% | 14.86% | 0.00% | **119** | 0.328 |
+
+      - **Mixup/CutMix**: both well below control, CutMix less damaging than
+        Mixup. Consistent with the augmentation finding — soft-label mixing
+        is an even stronger regularizer than TrivialAugment/RandAugment, and
+        15 epochs isn't enough runway for it. Given RandAugment's own 30-epoch
+        rematch still lost, extending Mixup/CutMix to 30 epochs was not judged
+        worth the further GPU-hours here — flagged as future work rather than
+        measured, since it needs its own justification, not an assumption
+        that they'd close the gap the way RandAugment partially did.
+      - **EMA**: worst-30-classes and macro-F1 both collapse alongside top-1.
+        Plausible cause, not confirmed: at decay 0.999 the effective
+        averaging window is ~1,000 steps, and this proxy is only ~6,945
+        steps total (463 batches x 15 epochs) — the EMA weights may still be
+        lagging well behind the raw, rapidly-changing (lr=0.8) weights when
+        the proxy ends, especially early in training before warmup settles.
+        A longer schedule or a faster (lower) decay would be needed to tell
+        EMA's ceiling from an artifact of this specific proxy length.
+      - **GCE loss**: by far the worst result, and the shape of the failure
+        is the tell — 119 of 251 classes at zero accuracy, and this is *not*
+        underconfidence: mean confidence on wrong predictions is 0.49 and
+        ECE is the worst of every recipe tested (0.328), i.e. GCE is
+        confidently wrong on the classes it collapsed on. lr=0.8 was tuned
+        for CE's loss landscape; GCE's bounded loss (`L_q = (1 - p_y^q)/q`)
+        produces much smaller gradients as confidence rises, so a fixed
+        high LR tuned for CE is not a fair test of GCE's ceiling. **This
+        result says "GCE needs its own LR search," not "GCE fails on this
+        dataset."** Revisit only if noise-robustness becomes a priority —
+        not spending more budget on it now.
+
+      **What Phase D's recipe search carries forward: the plain recipe**
+      (label-smoothed CE, no extra augmentation, no Mixup/CutMix, no EMA) at
+      lr=0.8. Nothing tested beat it within the budgets measured here, and
+      the deep-dive (not just top-1) confirms this isn't a headline-number
+      illusion for augmentation — the one recipe close enough to be worth
+      the rematch. GCE and EMA's poor showings are attributable to
+      untuned hyperparameters for this specific proxy length rather than
+      the techniques being wrong for this problem; noted as open follow-ups,
+      not settled negatives.
 - [ ] **Batch size in {160, 256, 512}, LR scaled with it (linear scaling rule).**
       Measured on the baseline trunk at 176 px: throughput is flat across this
       range (1738-1785 img/s, batch 160-768), VRAM scaling linearly from 1.28 to
@@ -238,9 +343,17 @@ recipe are both decided.
       buys nothing in wall-clock. The reason to sweep it anyway is gradient
       noise and BatchNorm statistics, which do change with batch size; that is
       an accuracy question, not a throughput one.
-- [ ] One proxy for noise handling: CE + label smoothing vs GCE. Adopt only if it
+- [x] One proxy for noise handling: CE + label smoothing vs GCE. Adopt only if it
       wins. Co-teaching stays out — two networks is a 2x cost with no evidence
       behind it here.
+
+      Run above (GCE loss row, 22.23% vs control's 55.58%) — GCE did not win,
+      so label-smoothed CE is kept. Caveat carried over from that row: this
+      used lr=0.8, tuned for CE, and GCE's collapse pattern (119/251
+      zero-accuracy classes, confidently wrong per its ECE) is consistent
+      with an LR mismatch rather than GCE being unsuitable for this
+      dataset's label noise. Not reopening without a dedicated LR search for
+      GCE, which hasn't been budgeted.
 - [ ] **One** 90-epoch run at 176 px, evaluated with FixRes-style test-resolution
       correction (train 176, test 224 centre crop).
 - [ ] Optional, cheap to measure: `torch.compile`.
@@ -303,11 +416,30 @@ together, but for unrelated reasons.
   defined in `benchmarks/trunk_variants.VARIANTS` and can be re-proxied (or
   re-run with a second seed, per the option not taken here) without redoing
   any of the measurement work above.
+- **Phase D recipe: plain (label-smoothed CE, no augmentation/Mixup/CutMix/
+  EMA), lr=0.8.** All five recipe axes were proxied at 15 epochs; nothing
+  beat plain. The one close call, RandAugment, got a matched 30-epoch
+  rematch specifically because the 15-epoch gap (~3 points) coincided with
+  its train loss still being well above the control's — a real "is 15
+  epochs long enough to judge this" signal that the other three additions
+  didn't show as clearly. At 30 epochs the gap narrowed to 0.84 points but
+  control still won on every axis of the deep-dive (macro-F1, worst-30
+  classes, calibration), so plain carries forward. GCE's collapse (119/251
+  zero-accuracy classes, confidently wrong per its calibration numbers) and
+  EMA's is each attributed to an untuned setting for this proxy length
+  (lr=0.8 was picked for CE; GCE's bounded loss wants its own LR search;
+  EMA's decay=0.999 implies a ~1,000-step averaging window against a
+  ~6,945-step proxy) rather than a settled verdict against the technique —
+  noted as open follow-ups. **Explicitly revisitable** the same way the
+  trunk choice above is: if the eventual full run underperforms, RandAugment
+  is the candidate worth another look first, given how much its gap closed
+  once epoch count was matched.
 - **Phase D recipe axes are implemented in `main.py`, opt-in, all defaulting
   to off**: `--augment {trivial,rand}`, `--mix {mixup,cutmix}`, `--ema`,
-  `--loss gce`. None have been proxied yet — the code landing and the sweep
-  running are separate steps, don't conflate "implemented" with "measured."
-  Checkpoints are namespaced under `checkpoints/<run-label>.pth.tar`, fixing
+  `--loss gce`. All five have now been proxied (see Phase D); none beat the
+  plain recipe within the budgets measured, and it carries forward for the
+  eventual full 90-epoch run. Checkpoints are namespaced under
+  `checkpoints/<run-label>.pth.tar`, fixing
   a real bug where sequential runs silently overwrote each other's weights
   (the smoke test's converged checkpoint was lost this way; its logged
   metrics in `runs/` were not affected).

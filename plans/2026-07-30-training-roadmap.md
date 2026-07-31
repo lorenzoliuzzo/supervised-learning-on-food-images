@@ -265,13 +265,25 @@ recipe are both decided.
       | none (control) | **61.27%** | **59.38%** | **60.90%** | **23.62%** | 0.144 |
       | RandAugment | 60.43% | 58.31% | 59.84% | 23.21% | 0.157 |
 
-      The 15-epoch proxy exaggerated the gap in *magnitude* (~3 points) but
-      not in *direction*: at matched epochs the gap narrows to 0.84 points,
-      and control still wins on every axis in the deep-dive, calibration
-      included. Conclusion: **RandAugment is not worth its complexity at
-      this schedule length**, but the margin is close enough that it's
-      worth re-checking if the eventual full run's length or LR changes
-      materially.
+      The 15-epoch proxy exaggerated the gap in magnitude (~3 points vs
+      0.84 at matched epochs), and control leads on every point-estimate
+      axis in the deep-dive. **But checked for statistical significance
+      with `benchmarks/significance_test.py`** — paired McNemar's test on
+      the same 6,063 val-dev images (`b`=454 images only control got right,
+      `c`=401 only RandAugment got right, n=855 discordant) — and the
+      0.84-point gap is *not* significant
+      (p=0.075, two-sided exact binomial on the discordant pairs).** The
+      honest read: this proxy has no power to distinguish "control is
+      slightly better" from "these are statistically tied." Conclusion,
+      revised from an earlier draft of this section that called it a clean
+      win: **no proxy evidence that RandAugment beats the plain recipe at
+      this schedule length, but also none that it's meaningfully worse** —
+      plain still carries forward on simplicity, not on a proven margin.
+      Single seed per config throughout (no repeated-seed runs anywhere in
+      Phase C or D — see that Phase's own caveat), so this is silent on
+      training-noise variance on top of the sampling variance McNemar
+      covers; a second seed on both legs would be the way to actually
+      settle it.
 
       *Incident, 2026-07-31:* the worktree running the first 30-epoch
       RandAugment attempt was recycled mid-training (session-level infra,
@@ -298,6 +310,11 @@ recipe are both decided.
       | CutMix | 48.84% | 45.61% | 7.19% | 5 | 0.172 |
       | EMA (decay 0.999) | 39.88% | 38.32% | 4.52% | 9 | 0.107 |
       | GCE loss (q=0.7) | 22.23% | 14.86% | 0.00% | **119** | 0.328 |
+
+      Unlike the RandAugment rematch, these four don't need a significance
+      caveat — paired McNemar's test (same protocol as above, each vs the
+      15-epoch control) puts all four at p < 0.0001. These are large,
+      unambiguous effects, not proxy noise.
 
       - **Mixup/CutMix**: both well below control, CutMix less damaging than
         Mixup. Consistent with the augmentation finding — soft-label mixing
@@ -329,12 +346,17 @@ recipe are both decided.
 
       **What Phase D's recipe search carries forward: the plain recipe**
       (label-smoothed CE, no extra augmentation, no Mixup/CutMix, no EMA) at
-      lr=0.8. Nothing tested beat it within the budgets measured here, and
-      the deep-dive (not just top-1) confirms this isn't a headline-number
-      illusion for augmentation — the one recipe close enough to be worth
-      the rematch. GCE and EMA's poor showings are attributable to
-      untuned hyperparameters for this specific proxy length rather than
-      the techniques being wrong for this problem; noted as open follow-ups,
+      lr=0.8. Confidence differs by candidate, not uniform across the row:
+      Mixup, CutMix, EMA and GCE loss are decisively ruled out
+      (p < 0.0001 each, large point-estimate gaps, and the deep-dive rules
+      out a rare-class or calibration trade-off hiding behind the numbers).
+      RandAugment is not decisively ruled out — its matched-epoch gap
+      (0.84 points) is not statistically significant (p=0.075) on a single
+      seed each — so "plain wins" there is really "plain is simpler and
+      nothing forces a switch," not "plain is proven better." GCE and EMA's
+      poor showings are additionally attributable to untuned
+      hyperparameters for this specific proxy length rather than the
+      techniques being wrong for this problem; noted as open follow-ups,
       not settled negatives.
 - [ ] **Batch size in {160, 256, 512}, LR scaled with it (linear scaling rule).**
       Measured on the baseline trunk at 176 px: throughput is flat across this
@@ -422,9 +444,13 @@ together, but for unrelated reasons.
   rematch specifically because the 15-epoch gap (~3 points) coincided with
   its train loss still being well above the control's — a real "is 15
   epochs long enough to judge this" signal that the other three additions
-  didn't show as clearly. At 30 epochs the gap narrowed to 0.84 points but
-  control still won on every axis of the deep-dive (macro-F1, worst-30
-  classes, calibration), so plain carries forward. GCE's collapse (119/251
+  didn't show as clearly. At 30 epochs the gap narrowed to 0.84 points and
+  control led on every point-estimate axis of the deep-dive, but a paired
+  McNemar's test on the shared val-dev images found that gap **not**
+  statistically significant (p=0.075, single seed each) — so plain carries
+  forward on simplicity and an unbeaten track record, not a proven margin
+  over RandAugment specifically. Mixup/CutMix/EMA/GCE's losses, by
+  contrast, are all p < 0.0001 — decisively real. GCE's collapse (119/251
   zero-accuracy classes, confidently wrong per its calibration numbers) and
   EMA's is each attributed to an untuned setting for this proxy length
   (lr=0.8 was picked for CE; GCE's bounded loss wants its own LR search;
@@ -444,10 +470,14 @@ together, but for unrelated reasons.
   (the smoke test's converged checkpoint was lost this way; its logged
   metrics in `runs/` were not affected).
 - **Analysis tooling**: `benchmarks/plot_runs.py` (learning-curve and
-  multi-run comparison plots) and `benchmarks/analyze_errors.py`
+  multi-run comparison plots), `benchmarks/analyze_errors.py`
   (classification report, top-confused class pairs, per-class accuracy,
   confidence histogram, t-SNE of penultimate features — CPU-default, reads
-  a checkpoint, doesn't require the GPU). Per-epoch `lr` and top-3 accuracy
+  a checkpoint, doesn't require the GPU), and `benchmarks/significance_test.py`
+  (paired McNemar's test between two checkpoints on the same val split —
+  point-estimate accuracy gaps alone don't say whether a comparison had the
+  power to detect a real difference; added once the Phase D recipe search
+  needed it, see that Phase for why). Per-epoch `lr` and top-3 accuracy
   are now logged in `RunLog`; older logs in `runs/` predate both fields and
   are read by `plot_runs.py` without crashing rather than backfilled.
 

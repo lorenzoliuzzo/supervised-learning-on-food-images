@@ -1,9 +1,14 @@
-# Run: python benchmarks/proxy_sweep.py [food251]
+# Run: python benchmarks/proxy_sweep.py [food251] --variants baseline narrow-384
 #
-# Phase C of plans/2026-07-30-training-roadmap.md: four 15-epoch proxy runs on
-# real data, real labels, val-dev top-1/top-5 -- not the synthetic-batch
-# throughput sweep in trunk_variants.py. Answers whether the 5-stage variant's
-# 3x3 final map costs accuracy relative to the 6x6 alternatives.
+# The 15-epoch proxy protocol of plans/2026-07-30-training-roadmap.md, on real
+# data, real labels, val-dev top-1/top-5 -- not the synthetic-batch throughput
+# sweep in trunk_variants.py. Ranks trunk and head variants against each other
+# cheaply enough to be routine; the full 90-epoch run confirms once.
+#
+# Phase C used it to answer whether the 5-stage variant's 3x3 final map costs
+# accuracy (it does). Which variants run is now a command-line choice, because
+# #28 and #29 ask the same question of trunks narrower than baseline and of
+# pooling heads, and hardcoding one phase's shortlist made that a code edit.
 from __future__ import annotations
 
 import argparse
@@ -11,13 +16,14 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torchvision.transforms as transforms
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from trunk_variants import VARIANTS, trunk  # noqa: E402
+from trunk_variants import BY_KEY, Variant  # noqa: E402
 
 from main import (  # noqa: E402
     FoodX251Dataset,
@@ -29,22 +35,29 @@ from main import (  # noqa: E402
 )
 from runlog import RunLog  # noqa: E402
 
-# The four trunks Phase C compares, pulled from trunk_variants.VARIANTS by
-# label so the widths/blocks/pool settings can't drift from the synthetic
-# throughput sweep those same labels are ranked in.
-CANDIDATE_LABELS = {
-    "baseline  [2,2,2,1] 64-512",
-    "deeper@11 [2,2,4,1] 64-512",
-    "deeper@6  [2,2,2,2] 64-448",
-    "5 stages  [2,2,2,2,1] 48-512",
-}
+# The four trunks Phase C compared. Kept as the default so `proxy_sweep.py` with
+# no --variants still reproduces that table; every definition still comes from
+# trunk_variants so the widths/blocks/head can't drift from the synthetic
+# throughput sweep the same keys are ranked in.
+PHASE_C_KEYS = ["baseline", "deep-4", "deep-6", "5stage"]
+
+
+def predict_correct(
+    loader: torch.utils.data.DataLoader, model: nn.Module, device: torch.device
+) -> np.ndarray:
+    model.eval()
+    correct: list[np.ndarray] = []
+    with torch.no_grad():
+        for images, target in loader:
+            images = images.to(device, non_blocking=True, memory_format=torch.channels_last)
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                preds = model(images).argmax(dim=1)
+            correct.append((preds.cpu() == target).numpy().astype(np.int8))
+    return np.concatenate(correct)
 
 
 def run_proxy(
-    label: str,
-    widths: tuple[int, ...],
-    blocks: tuple[int, ...],
-    pool: bool,
+    variant: Variant,
     *,
     data_root: Path,
     val_split: Path,
@@ -55,7 +68,7 @@ def run_proxy(
     log_dir: Path,
 ) -> tuple[float, float]:
     device = torch.device("cuda")
-    model = trunk(widths, blocks, pool=pool).to(device, memory_format=torch.channels_last)
+    model = variant.build().to(device, memory_format=torch.channels_last)
     torch.cuda.reset_peak_memory_stats()
 
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1).to(device)
@@ -100,12 +113,14 @@ def run_proxy(
                                print_freq=50)
 
     params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    run = RunLog(label=label.split()[0], config={
-        "label": label, "params": params, "epochs": epochs, "batch_size": batch_size,
+    run = RunLog(label=variant.key, config={
+        "label": variant.label, "key": variant.key, "head": variant.head,
+        "widths": list(variant.widths), "blocks": list(variant.blocks),
+        "params": params, "epochs": epochs, "batch_size": batch_size,
         "lr": lr, "val_dev_size": len(val_dataset),
     })
 
-    print(f"\n=== {label} ({params / 1e6:.2f}M params) ===")
+    print(f"\n=== {variant.label} ({params / 1e6:.2f}M params) ===")
     for epoch in range(epochs):
         started = time.perf_counter()
         lr_used = optimizer.param_groups[0]['lr']
@@ -123,6 +138,16 @@ def run_proxy(
     path = run.save(log_dir, peak_vram_gib=peak_vram_gib)
     print(f"  -> {path}")
 
+    # A point-estimate accuracy gap can't say whether a comparison had the power
+    # to detect a real difference, and these proxies routinely land within a
+    # point of each other. Saving the per-image correctness vector lets
+    # significance_test.py pair variants afterwards without this sweep having to
+    # keep checkpoints around -- which it deliberately doesn't, and which
+    # wouldn't load into FoodCNN anyway once the head or widths differ.
+    predictions_path = log_dir / f"{variant.key}-correct.npy"
+    np.save(predictions_path, predict_correct(val_loader, model, device))
+    print(f"  -> {predictions_path}")
+
     final = run.history[-1]
     return final.val_acc1, final.val_acc5
 
@@ -134,26 +159,35 @@ def main() -> None:
     parser.add_argument("--epochs", default=15, type=int)
     parser.add_argument("--batch-size", default=256, type=int)
     parser.add_argument("--workers", default=8, type=int)
-    parser.add_argument("--lr", default=0.1, type=float)
-    parser.add_argument("--log-dir", default="runs/phaseC", type=Path)
+    # Defaults are the recipe Phase D settled on, not the 0.1 Phase C ran at.
+    # Phase C's numbers predate the LR search and are not comparable to anything
+    # measured since; a sweep that silently reproduced them would invite exactly
+    # that mistake.
+    parser.add_argument("--lr", default=0.8, type=float)
+    parser.add_argument("--log-dir", default="runs/proxy", type=Path)
+    parser.add_argument("--variants", nargs="+", default=PHASE_C_KEYS, metavar="KEY",
+                        help=f"trunk_variants keys to run; one of {sorted(BY_KEY)}")
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
         raise SystemExit("this sweep trains on real data; no CUDA device found")
 
-    candidates = [v for v in VARIANTS if v[0] in CANDIDATE_LABELS]
-    if len(candidates) != len(CANDIDATE_LABELS):
-        raise SystemExit("trunk_variants.VARIANTS no longer contains all four Phase C labels")
+    unknown = [key for key in args.variants if key not in BY_KEY]
+    if unknown:
+        raise SystemExit(f"unknown variant key(s) {unknown}; known keys: {sorted(BY_KEY)}")
+
+    args.log_dir.mkdir(parents=True, exist_ok=True)
 
     results = []
-    for label, widths, blocks, pool in candidates:
+    for key in args.variants:
+        variant = BY_KEY[key]
         acc1, acc5 = run_proxy(
-            label, widths, blocks, pool,
+            variant,
             data_root=args.data, val_split=args.val_split, epochs=args.epochs,
             batch_size=args.batch_size, workers=args.workers, lr=args.lr,
             log_dir=args.log_dir,
         )
-        results.append((label, acc1, acc5))
+        results.append((variant.label, acc1, acc5))
 
     print(f"\n{'variant':36s} {'val-dev top1':>12s} {'val-dev top5':>12s}")
     for label, acc1, acc5 in sorted(results, key=lambda r: -r[1]):

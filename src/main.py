@@ -90,6 +90,11 @@ parser.add_argument('--augment', default='none', choices=['none', 'trivial', 'ra
                          '(default: none)')
 parser.add_argument('--mix', default='none', choices=['none', 'mixup', 'cutmix'],
                     help='batch-level Mixup/CutMix regularization (default: none)')
+parser.add_argument('--crop-scale-min', default=0.08, type=float,
+                    help='lower bound on RandomResizedCrop area, i.e. the smallest '
+                         'fraction of the image a train view may be cropped from. '
+                         '0.08 is the ImageNet default inherited from the reference '
+                         'script and is aggressive for 90k images (default: 0.08)')
 parser.add_argument('--ema', action='store_true',
                     help='track an exponential moving average of weights and '
                          'validate against it instead of the raw weights')
@@ -154,12 +159,13 @@ def dataset_paths(
     return train, val
 
 
-def build_train_transform(augment: str, normalize: transforms.Normalize) -> transforms.Compose:
+def build_train_transform(augment: str, normalize: transforms.Normalize,
+                          crop_scale_min: float = 0.08) -> transforms.Compose:
     # TrivialAugment/RandAugment operate on the PIL image, so they slot in
     # after the geometric transforms and before ToTensor -- not appended, or
     # they'd run on an already-normalized tensor.
     pipeline: list[object] = [
-        transforms.RandomResizedCrop(176),
+        transforms.RandomResizedCrop(176, scale=(crop_scale_min, 1.0)),
         transforms.RandomHorizontalFlip(),
     ]
     if augment == 'trivial':
@@ -469,7 +475,7 @@ def main_worker(gpu, ngpus_per_node, args):
     train_dataset = FoodX251Dataset(
         train_dir,
         train_labels,
-        build_train_transform(args.augment, normalize)
+        build_train_transform(args.augment, normalize, args.crop_scale_min)
     )
 
     val_subset = load_val_split(args.val_split, args.val_subset)

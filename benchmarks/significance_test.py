@@ -27,9 +27,17 @@ from model import FoodCNN  # noqa: E402
 NUM_CLASSES = 251
 
 
-def correctness(checkpoint: Path, loader: torch.utils.data.DataLoader, device: torch.device) -> np.ndarray:
+def correctness(source: Path, loader: torch.utils.data.DataLoader, device: torch.device) -> np.ndarray:
+    # `.npy` is the per-image correctness vector proxy_sweep.py saves at the end
+    # of a run. Proxy variants change the head or the stage widths, so they don't
+    # load into FoodCNN and can't be re-scored from a checkpoint here -- the
+    # sweep has to hand over its own predictions. Same val-dev images in the same
+    # order either way, which is what makes the pairing valid.
+    if source.suffix == ".npy":
+        return np.load(source).astype(int)
+
     model = FoodCNN(num_classes=NUM_CLASSES)
-    ck = torch.load(checkpoint, map_location=device)
+    ck = torch.load(source, map_location=device)
     model.load_state_dict(ck["state_dict"])
     model.to(device)
     result = run_inference(model, loader, device)
@@ -73,6 +81,15 @@ def main() -> None:
 
     control_correct = correctness(args.control, loader, device)
     other_correct = correctness(args.other, loader, device)
+    # McNemar's is only valid on paired observations. A saved correctness vector
+    # carries no record of which split produced it, so a length mismatch is the
+    # one chance to catch a val-dev vector being paired against a val-test one.
+    if len(control_correct) != len(other_correct) or len(control_correct) != len(dataset):
+        raise SystemExit(
+            f"not paired: {len(control_correct)} and {len(other_correct)} predictions "
+            f"against {len(dataset)} val-{args.split} images -- these were scored on "
+            "different splits")
+
     result = mcnemar(control_correct, other_correct)
 
     control_acc, other_acc = control_correct.mean() * 100, other_correct.mean() * 100

@@ -1,6 +1,6 @@
 # Training roadmap
 
-**Status:** Phases A, B, C done; smoke test converged at 61.57% val-dev top-1; trunk decided (baseline, provisional); Phase D recipe search done — lr=0.8, plain recipe (no augmentation/Mixup/CutMix/EMA) carries forward, nothing tested beat it (see Phase D for the matched-epoch rematch and why GCE/EMA's poor showings aren't final verdicts); batch-size sweep and the single 90-epoch full run are next · **Baseline `main`:** `820f347` · **Last measured:** 2026-07-31
+**Status:** Phases A, B, C done; smoke test converged at 61.57% val-dev top-1; trunk decided (baseline, provisional); Phase D recipe search done — lr=0.8, plain recipe (no augmentation/Mixup/CutMix/EMA) carries forward, nothing tested beat it (see Phase D for the matched-epoch rematch and why GCE/EMA's poor showings aren't final verdicts); Phase C addendum done — nothing below baseline or in the head beats it either, and the accuracy floor is now bracketed between 1.68M and 5.18M; **no run has ever been seeded (#33)**, so every "single seed" caveat below understates the uncertainty; batch-size sweep and the single 90-epoch full run are next · **Baseline `main`:** `820f347` · **Last measured:** 2026-08-02
 
 Every number here was measured on the project box (RTX 5050 Laptop, 8 GB VRAM,
 16 threads) at 176 px / bf16 / `channels_last`, in `performance` power profile,
@@ -125,13 +125,21 @@ than the new shortcut BNs add back). 17 tests pass, `ruff check .` clean.
       no information not already in the dataset + one seed), regenerate with
       `python src/make_val_split.py` before the first training run on a fresh
       checkout.
-- [x] **Fixed seed and a fixed 15-epoch proxy protocol** for every comparison.
-      At ~1.2 min/epoch a proxy run is ~18 minutes, so comparisons that would be
-      unaffordable at 90 epochs are routine. Rank on the proxy, confirm once at
-      full length.
+- [ ] **Fixed seed** and [x] **a fixed 15-epoch proxy protocol** for every
+      comparison. At ~1.2 min/epoch a proxy run is ~18 minutes, so comparisons
+      that would be unaffordable at 90 epochs are routine. Rank on the proxy,
+      confirm once at full length.
       `main.py --val-subset dev` (default) reads `splits/val_split.csv` and
       restricts validation to val-dev automatically; `--val-subset test` is the
       explicit, one-time opt-in for the report's headline number.
+
+      **The seed half of this was never implemented** (found 2026-08-02, see
+      issue #33). `main.py`'s `--seed` defaults to `None`, nothing passes it,
+      and `proxy_sweep.py` doesn't set one either, so *every* Phase C and
+      Phase D number came from an unseeded, unrepeatable run. Unticked here
+      rather than quietly left green. Wherever the phases below say "single
+      seed each", read "unseeded". The proxy-protocol half is real and is
+      what the comparisons below actually rest on.
 - [x] **Per-run logging**: config hash, per-epoch train/val top-1 and top-5,
       wall-clock, peak VRAM. Capture what the report needs the first time.
       `src/runlog.py` (`RunLog`), wired into `main.py`'s epoch loop and into
@@ -168,6 +176,57 @@ than the new shortcut BNs add back). 17 tests pass, `ruff check .` clean.
       so the four runs above trained with a 64-parameter stem bias none of
       the graded architecture has. Negligible next to the multi-point gaps
       above, not worth rerunning for; future sweeps use the corrected stem.)
+
+## Phase C addendum — below baseline, and the head (2026-08-02, ~1.6 GPU-h)
+
+Phase C only ever swept 6.58M-9.46M: baseline and up. Diminishing returns
+going up says nothing about going down, and the head had never been an
+experimental axis at all. Five 15-epoch legs (issues #28, #29), all through
+`benchmarks/proxy_sweep.py` in one pass under the **Phase D recipe**
+(plain, lr=0.8, batch 256) rather than Phase C's pre-LR-search 0.1 — so
+these are not comparable to the Phase C table above, which is why the
+baseline was re-run here as its own leg rather than quoted from it.
+
+| Variant | Params | val-dev top1 | Δ vs baseline | McNemar p | Peak VRAM |
+| --- | --- | --- | --- | --- | --- |
+| **narrow `[2,2,2,1]` 64-384** | **5.18M** | **55.22%** | **+0.00** | **1.0000** | 1.96 GiB |
+| baseline `[2,2,2,1]` 64-512 | 6.58M | 55.22% | — | — | 1.99 GiB |
+| head: spatial attention | 6.59M | 55.01% | -0.21 | 0.6826 | 1.99 GiB |
+| narrow `[2,2,2,1]` 32-256 | 1.68M | 48.64% | -6.58 | <0.0001 | 1.08 GiB |
+| head: GAP+GMP concat | 6.71M | 37.51% | -17.71 | <0.0001 | 1.99 GiB |
+
+(Accuracies are each leg's saved per-image correctness vector, which
+`proxy_sweep.py` scores in bf16; the per-epoch logs score in fp32 and read
+~0.03 lower. All five vectors are produced identically, which is what makes
+the pairing valid.)
+
+- **There is an accuracy floor, and baseline sits well above it.** 64-384 at
+  21% fewer parameters is not merely close to baseline, it is a dead heat —
+  `b`=441 discordant one way, `c`=441 the other, p=1.0000. 32-256 then loses
+  6.58 points at p<0.0001. So the flat region extends below baseline but not
+  far, and it ends in a cliff rather than a slope, somewhere between 1.68M
+  and 5.18M. **Capacity is not the binding constraint at 6.58M and wasn't at
+  5.18M either** — the §2 claim that the parameter cap doesn't bind now has
+  evidence on both sides of baseline instead of one.
+- **Neither pooling head helps.** Spatial attention is a clean null (-0.21,
+  p=0.68): learned pooling weights bought nothing over uniform averaging.
+- **GAP+GMP underfits rather than overfits, and its LR is the suspect.** Its
+  train loss starts *above* baseline's at epoch 0 (5.595 vs 4.996) and never
+  closes (3.851 vs 2.994 at epoch 14), with val top-1 still climbing steeply
+  at the end (31.4% to 37.5% over the last two epochs). No divergence, no
+  NaN — a slower trajectory, not a broken one. Max-pooled activations are
+  unbounded and much larger than mean-pooled ones, so concatenating hands the
+  classifier two input blocks on very different scales, and lr=0.8 was tuned
+  for a head without that problem. **Same caveat as GCE and EMA below: this
+  says "needs its own LR or a norm on the concatenated features," not "wrong
+  for this dataset."** Not spending more budget on it — the attention head's
+  clean null is weak evidence that pooling isn't where the accuracy is.
+
+**Adopting 64-384 is an architecture decision, not a measurement one, and is
+not taken here.** For: 21% fewer parameters at a literal dead heat, on a
+project graded against a parameter cap. Against: it buys no accuracy, no
+meaningful wall-clock (20 vs 21 min) and no VRAM that matters, and baseline
+is the trunk every Phase D number was measured on. `model.py` unchanged.
 
 ## Smoke test — pipeline validated, not a Phase D result
 
@@ -409,6 +468,7 @@ SimCLR is excluded — it degrades below ~1k batch, unreachable in 8 GB.
 | Phase | GPU-h |
 | --- | --- |
 | C — architecture proxies (4 x 18 min) | 1.2 |
+| C addendum — width floor + heads (5 x 19 min, measured) | 1.6 |
 | D — recipe proxies (8 x 18 min) | 2.4 |
 | D — full supervised run (90 ep) | 1.8 |
 | E — SSL track including control | ~18 |
@@ -438,6 +498,15 @@ together, but for unrelated reasons.
   defined in `benchmarks/trunk_variants.VARIANTS` and can be re-proxied (or
   re-run with a second seed, per the option not taken here) without redoing
   any of the measurement work above.
+
+  **Strengthened 2026-08-02 by the Phase C addendum**, which tested the
+  direction Phase C never did: 64-384 at 5.18M ties baseline exactly
+  (p=1.0000), 32-256 at 1.68M loses 6.58 points. The argument above was
+  "that headroom hasn't measured as worth anything yet" — one-sided, since
+  nothing below baseline had been tried. It is now two-sided: baseline sits
+  on a plateau, and the cliff is at least 1.4M parameters below it. The
+  choice stands, and 64-384 is a live alternative that costs nothing rather
+  than a risk. Neither pooling head (#29) displaces the GAP head either.
 - **Phase D recipe: plain (label-smoothed CE, no augmentation/Mixup/CutMix/
   EMA), lr=0.8.** All five recipe axes were proxied at 15 epochs; nothing
   beat plain. The one close call, RandAugment, got a matched 30-epoch

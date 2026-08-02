@@ -148,3 +148,32 @@ def test_build_train_transform_none_has_no_augmentation_op() -> None:
     names = [type(t).__name__ for t in transform.transforms]
     assert "TrivialAugmentWide" not in names
     assert "RandAugment" not in names
+
+
+def test_build_train_transform_defaults_to_the_imagenet_crop_scale() -> None:
+    # Pins the inherited default. Every Phase C and Phase D number was measured
+    # at 0.08, so changing it silently would retroactively change what those
+    # runs mean.
+    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    crop = build_train_transform("none", normalize).transforms[0]
+
+    assert crop.scale == (0.08, 1.0)
+
+
+def test_build_train_transform_crop_scale_min_reaches_the_crop() -> None:
+    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    crop = build_train_transform("rand", normalize, 0.4).transforms[0]
+
+    assert crop.scale == (0.4, 1.0)
+
+
+@pytest.mark.parametrize("crop_scale_min", [0.08, 0.25, 0.4])
+def test_build_train_transform_output_shape_is_independent_of_crop_scale(
+    crop_scale_min: float,
+) -> None:
+    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    transform = build_train_transform("none", normalize, crop_scale_min)
+
+    out = transform(Image.new("RGB", (200, 150)))
+
+    assert out.shape == (3, 176, 176)

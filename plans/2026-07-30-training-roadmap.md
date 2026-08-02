@@ -1,6 +1,6 @@
 # Training roadmap
 
-**Status:** Phases A, B, C done; smoke test converged at 61.57% val-dev top-1; trunk decided (baseline, provisional); Phase D recipe search done — lr=0.8, plain recipe (no augmentation/Mixup/CutMix/EMA) carries forward, nothing tested beat it (see Phase D for the matched-epoch rematch and why GCE/EMA's poor showings aren't final verdicts); Phase C addendum done — nothing below baseline or in the head beats it either, and the accuracy floor is now bracketed between 1.68M and 5.18M; **no run has ever been seeded (#33)**, so every "single seed" caveat below understates the uncertainty; batch-size sweep and the single 90-epoch full run are next · **Baseline `main`:** `820f347` · **Last measured:** 2026-08-02
+**Status:** Phases A, B, C done; smoke test converged at 61.57% val-dev top-1; trunk decided (baseline, provisional); Phase D recipe search done — lr=0.8, plain recipe (no augmentation/Mixup/CutMix/EMA) carries forward, nothing tested beat it (see Phase D for the matched-epoch rematch and why GCE/EMA's poor showings aren't final verdicts); Phase C addendum done — nothing below baseline or in the head beats it either, and the accuracy floor is now bracketed between 1.68M and 5.18M; **no run has ever been seeded (#33)**, so every "single seed" caveat below understates the uncertainty; batch-size sweep done — 160/256/512 statistically tied, batch stays 256; RandomResizedCrop scale-floor proxy done — closing the train/val gap doesn't buy accuracy, 0.08 default stays; the single 90-epoch full run is next, launching now · **Baseline `main`:** `820f347` · **Last measured:** 2026-08-02
 
 Every number here was measured on the project box (RTX 5050 Laptop, 8 GB VRAM,
 16 threads) at 176 px / bf16 / `channels_last`, in `performance` power profile,
@@ -417,13 +417,75 @@ recipe are both decided.
       hyperparameters for this specific proxy length rather than the
       techniques being wrong for this problem; noted as open follow-ups,
       not settled negatives.
-- [ ] **Batch size in {160, 256, 512}, LR scaled with it (linear scaling rule).**
+- [x] **Batch size in {160, 256, 512}, LR scaled with it (linear scaling rule).**
       Measured on the baseline trunk at 176 px: throughput is flat across this
       range (1738-1785 img/s, batch 160-768), VRAM scaling linearly from 1.28 to
       5.64 GiB — the GPU is compute-saturated at batch 160, not idle, so this
       buys nothing in wall-clock. The reason to sweep it anyway is gradient
       noise and BatchNorm statistics, which do change with batch size; that is
       an accuracy question, not a throughput one.
+
+      15-epoch proxy, plain recipe, LR scaled linearly from the batch-256
+      control (lr=0.8): batch 160 at lr=0.5, batch 512 at lr=1.6. Against the
+      `phaseD-lr0.8` checkpoint via `benchmarks/significance_test.py`:
+
+      | Batch | LR | val-dev top1 | Δ vs control | McNemar p | Peak VRAM |
+      | --- | --- | --- | --- | --- | --- |
+      | 160 | 0.5 | 55.85% | +0.18 | 0.7407 | 1.30 GiB |
+      | 256 (control) | 0.8 | 55.67% | — | — | 1.99 GiB |
+      | 512 | 1.6 | 55.30% | -0.36 | 0.4868 | 3.83 GiB |
+
+      All three tied. **Batch size is a non-lever for this recipe** — neither
+      throughput (already known) nor accuracy (now measured) moves across
+      160-512 with the LR scaled to match. Batch 256 stays, on no evidence
+      against it and because every other Phase D number was measured there.
+
+      One infra finding on the way: batch 512 at the default 8 workers
+      crashed with `RuntimeError: unable to allocate shared memory` one epoch
+      in — not VRAM, `/dev/shm` (7.7 GiB on this box). Each of the 8 workers
+      prefetches collated batches, and at batch 512 that overruns shm before
+      it overruns the GPU. Re-ran clean at `--workers 4`. Worth knowing if a
+      future run pushes batch size further: **`/dev/shm`, not VRAM, is what
+      binds first on this box at large batch.**
+
+- [x] **RandomResizedCrop scale floor** (not in the original Phase D list;
+      added 2026-08-02 after the matched-epoch 30-epoch runs showed val top-1
+      running 7-14 points *above* train top-1 with the gap widening, not
+      closing — the model underfits, it doesn't overfit, on every recipe axis
+      tried so far. `RandomResizedCrop(176)` had been running at the
+      ImageNet-inherited `scale=(0.08, 1.0)` since Phase A; a train view can
+      be cropped from 8% of the image, tuned for 1.28M images against this
+      dataset's ~90k. Made tunable via `--crop-scale-min`, default unchanged.
+
+      15-epoch proxy, plain recipe, lr=0.8, batch 256, against `phaseD-lr0.8`:
+
+      | Crop scale min | val-dev top1 | Δ | McNemar p | train_acc1 | gap (val-train) |
+      | --- | --- | --- | --- | --- | --- |
+      | 0.08 (control) | 55.58%\* | — | — | 44.53% | +11.05 |
+      | 0.25 | 55.71% | +0.05 | 0.9465 | 51.36% | +4.31 |
+      | 0.40 | 54.49% | -1.17 | **0.0232** | 55.19% | -0.56 |
+
+      (\*control's val-dev top1 shown here is the checkpoint re-score used
+      for every McNemar comparison, 55.67%, not the epoch-end log value used
+      elsewhere in this table — same run, two ways of reading it.)
+
+      **The hypothesis half-confirms and the accuracy half doesn't.** Raising
+      the crop floor closes the train/val gap exactly as predicted — it goes
+      from +11.05 to +4.31 to slightly negative, i.e. ordinary train-above-val
+      behaviour, by 0.40. But val accuracy does not follow: 0.25 ties control,
+      and 0.40 is significantly *worse*, not better. `RandomResizedCrop`'s
+      low-scale cropping is doing double duty as both regularizer and
+      view-diversity source — it teaches scale/translation invariance and
+      effectively multiplies the training set, which ordinary regularizers
+      like Mixup/RandAugment don't. Relaxing the floor makes the task easier
+      to fit but removes that diversity without buying back any epochs, so at
+      a fixed 15-epoch budget it's a net loss. No matched-epoch rematch run
+      for this one, unlike RandAugment's: 0.40 already trains *faster* per
+      epoch than control (55.19% vs 44.53% train_acc1 at epoch 15) and still
+      loses on val, so there is no "not converged yet" argument for more
+      epochs to close the gap. **`--crop-scale-min` stays in `main.py`,
+      default unchanged at 0.08** — sixth Phase D-style axis tested,
+      sixth to lose.
 - [x] One proxy for noise handling: CE + label smoothing vs GCE. Adopt only if it
       wins. Co-teaching stays out — two networks is a 2x cost with no evidence
       behind it here.

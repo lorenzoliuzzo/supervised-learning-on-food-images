@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 import torch
 from analyze_errors import (
+    default_out_dir,
     load_class_names,
     per_class_accuracy,
     plot_confidence_histogram,
@@ -16,6 +17,27 @@ from analyze_errors import (
 from torch.utils.data import DataLoader, TensorDataset
 
 from model import FoodCNN
+
+
+def test_default_out_dir_strips_best_and_both_extensions() -> None:
+    assert default_out_dir(pathlib.Path("checkpoints/phaseD-gce-best.pth.tar")) == pathlib.Path(
+        "runs/analysis/phaseD-gce")
+    assert default_out_dir(pathlib.Path("checkpoints/phaseD-gce.pth.tar")) == pathlib.Path(
+        "runs/analysis/phaseD-gce")
+
+
+def test_default_out_dir_keeps_dots_inside_the_run_label() -> None:
+    # Path.stem would turn "phaseD-lr0.8" into "phaseD-lr0" and collapse the
+    # whole learning-rate sweep into one directory.
+    assert default_out_dir(pathlib.Path("checkpoints/phaseD-lr0.8-best.pth.tar")) == pathlib.Path(
+        "runs/analysis/phaseD-lr0.8")
+
+
+def test_default_out_dir_differs_per_checkpoint() -> None:
+    # The point of the default: two checkpoints analyzed back to back must not
+    # write over each other.
+    assert default_out_dir(pathlib.Path("checkpoints/phaseD-gce-best.pth.tar")) != default_out_dir(
+        pathlib.Path("checkpoints/phaseD-mixup-best.pth.tar"))
 
 
 def test_load_class_names_parses_index_and_replaces_underscores(tmp_path: pathlib.Path) -> None:

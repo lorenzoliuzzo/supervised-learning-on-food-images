@@ -33,6 +33,16 @@ from main import FoodX251Dataset, dataset_paths, load_val_split  # noqa: E402
 from model import FoodCNN  # noqa: E402
 
 NUM_CLASSES = 251
+ANALYSIS_ROOT = Path("runs/analysis")
+
+
+def default_out_dir(checkpoint: Path) -> Path:
+    # One directory per checkpoint, so analyzing a second checkpoint can't
+    # silently overwrite the first one's results. Suffixes are stripped
+    # explicitly rather than with Path.stem/suffix: ".pth.tar" is two suffixes,
+    # and run labels contain dots (phaseD-lr0.8), which stem would eat too.
+    name = checkpoint.name.removesuffix(".tar").removesuffix(".pth")
+    return ANALYSIS_ROOT / name.removesuffix("-best")
 
 
 def load_class_names(path: Path, num_classes: int = NUM_CLASSES) -> list[str]:
@@ -198,14 +208,17 @@ def main() -> None:
     parser.add_argument("--device", default="cpu", choices=["cpu", "cuda"],
                          help="default cpu so this can run alongside a concurrent GPU "
                               "training job without contending for it")
-    parser.add_argument("--out", default="runs/analysis", type=Path)
+    parser.add_argument("--out", default=None, type=Path,
+                         help=f"default {ANALYSIS_ROOT}/<checkpoint name without "
+                              "'-best.pth.tar'>")
     parser.add_argument("--top-n", default=20, type=int)
     parser.add_argument("--tsne-samples", default=2000, type=int)
     parser.add_argument("--seed", default=251, type=int)
     args = parser.parse_args()
 
     device = torch.device(args.device)
-    args.out.mkdir(parents=True, exist_ok=True)
+    out_dir = args.out if args.out is not None else default_out_dir(args.checkpoint)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     class_names = load_class_names(args.data / "meta" / "class_list.txt")
 
@@ -241,7 +254,7 @@ def main() -> None:
 
     report = classification_report(targets, preds, labels=range(NUM_CLASSES),
                                     target_names=class_names, zero_division=0, output_dict=True)
-    pd.DataFrame(report).T.to_csv(args.out / "classification_report.csv")
+    pd.DataFrame(report).T.to_csv(out_dir / "classification_report.csv")
     macro, weighted = report["macro avg"], report["weighted avg"]
     print(f"macro avg    precision {macro['precision']:.3f}  recall {macro['recall']:.3f}  "
           f"f1 {macro['f1-score']:.3f}")
@@ -250,7 +263,7 @@ def main() -> None:
 
     pairs = top_confused_pairs(confusion, class_names, n=args.top_n)
     pd.DataFrame(pairs, columns=["true", "predicted", "count"]).to_csv(
-        args.out / "top_confused_pairs.csv", index=False)
+        out_dir / "top_confused_pairs.csv", index=False)
     print(f"\ntop {len(pairs)} most confused pairs (true -> predicted, count):")
     for true_name, pred_name, count in pairs:
         print(f"  {true_name:30s} -> {pred_name:30s}  {count}")
@@ -261,7 +274,7 @@ def main() -> None:
     duplicate_candidates = symmetric_confusion_candidates(confusion, class_names, n=args.top_n)
     pd.DataFrame(duplicate_candidates,
                  columns=["class_a", "class_b", "a_to_b", "b_to_a", "symmetric_rate"]).to_csv(
-        args.out / "possible_duplicate_classes.csv", index=False)
+        out_dir / "possible_duplicate_classes.csv", index=False)
     if duplicate_candidates:
         print(f"\n{len(duplicate_candidates)} possible near-duplicate classes "
               "(confused both ways, rate = combined confusions / combined support):")
@@ -269,14 +282,14 @@ def main() -> None:
             print(f"  {class_a:30s} <-> {class_b:30s}  {a_to_b}/{b_to_a}  ({rate * 100:.1f}%)")
 
     pd.DataFrame(confusion, index=class_names, columns=class_names).to_csv(
-        args.out / "confusion_matrix.csv")
+        out_dir / "confusion_matrix.csv")
 
-    plot_worst_classes(accuracy, class_names, args.out / "worst_classes.png")
-    plot_confidence_histogram(result["confidences"], correct, args.out / "confidence_histogram.png")
-    plot_tsne(result["features"], correct, args.out / "tsne.png",
+    plot_worst_classes(accuracy, class_names, out_dir / "worst_classes.png")
+    plot_confidence_histogram(result["confidences"], correct, out_dir / "confidence_histogram.png")
+    plot_tsne(result["features"], correct, out_dir / "tsne.png",
               samples=args.tsne_samples, seed=args.seed)
     print(f"\nwrote classification_report.csv, top_confused_pairs.csv, "
-          f"possible_duplicate_classes.csv, confusion_matrix.csv and 3 plots to {args.out}")
+          f"possible_duplicate_classes.csv, confusion_matrix.csv and 3 plots to {out_dir}")
 
 
 if __name__ == "__main__":

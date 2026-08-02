@@ -33,6 +33,7 @@ from main import (  # noqa: E402
     validate,
     warmup_cosine_lr,
 )
+from main import parser as main_parser  # noqa: E402
 from runlog import RunLog  # noqa: E402
 
 # The four trunks Phase C compared. Kept as the default so `proxy_sweep.py` with
@@ -45,6 +46,12 @@ PHASE_C_KEYS = ["baseline", "deep-4", "deep-6", "5stage"]
 def predict_correct(
     loader: torch.utils.data.DataLoader, model: nn.Module, device: torch.device
 ) -> np.ndarray:
+    # bf16, matching training, where validate() above scores in fp32. On a
+    # 6,063-image val-dev that moves a couple of borderline images, so this
+    # vector's mean can sit ~0.03 points off the logged val_acc1. Every vector
+    # is produced here the same way, so pairing two of them is consistent;
+    # pairing one against a checkpoint re-scored in fp32 is not, which is why
+    # the control leg gets re-run through this sweep rather than reused.
     model.eval()
     correct: list[np.ndarray] = []
     with torch.no_grad():
@@ -105,12 +112,16 @@ def run_proxy(
         val_dataset, batch_size=batch_size, shuffle=False,
         num_workers=workers, pin_memory=True, persistent_workers=True)
 
-    # train()/validate() only read these fields off `args`; a plain namespace
-    # avoids dragging in main.py's full distributed/checkpoint machinery for
-    # a proxy run that never checkpoints or resumes.
-    args = argparse.Namespace(no_accel=False, gpu=None, distributed=False,
-                               world_size=1, multiprocessing_distributed=False,
-                               print_freq=50)
+    # Every default from main.py's own parser, then the few fields a proxy run
+    # differs on. Hand-listing the fields train()/validate() happen to read is
+    # what broke this sweep silently once already: Phase D added --mix, train()
+    # started reading args.mix, and nothing here knew until it crashed a leg in.
+    args = main_parser.parse_args([])
+    args.distributed = False
+    args.multiprocessing_distributed = False
+    args.gpu = None
+    args.batch_size = batch_size
+    args.workers = workers
 
     params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     run = RunLog(label=variant.key, config={

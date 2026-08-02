@@ -95,12 +95,22 @@ parser.add_argument('--ema', action='store_true',
                          'validate against it instead of the raw weights')
 parser.add_argument('--ema-decay', default=0.999, type=float,
                     help='EMA decay rate (default: 0.999)')
-parser.add_argument('--loss', default='ce', choices=['ce', 'gce'],
-                    help='training loss: label-smoothed cross-entropy, or GCE for '
-                         'label noise robustness (default: ce)')
+parser.add_argument('--loss', default='ce', choices=['ce', 'gce', 'sim'],
+                    help='training loss: label-smoothed cross-entropy, GCE for label '
+                         'noise robustness, or sim for near-duplicate-aware smoothing '
+                         'built from train-set-only confusion (default: ce)')
 parser.add_argument('--gce-q', default=0.7, type=float,
                     help='GCE q in (0, 1]: lower is closer to CE, higher is more '
                          'noise-robust (default: 0.7, per Zhang & Sabuncu 2018)')
+parser.add_argument('--similarity-pairs',
+                    default='runs/analysis/train-confusion/possible_duplicate_classes.csv',
+                    type=str,
+                    help='CSV of class_a,class_b near-duplicate pairs for --loss sim, '
+                         'generated with `analyze_errors.py <checkpoint> --split train` '
+                         '(see issue #27); falls back to uniform smoothing if missing')
+parser.add_argument('--similarity-partner-frac', default=0.5, type=float,
+                    help='fraction of the smoothing budget given to detected partner '
+                         'classes for --loss sim (default: 0.5)')
 
 
 class FoodX251Dataset(torch.utils.data.Dataset):
@@ -160,6 +170,14 @@ def build_train_transform(augment: str, normalize: transforms.Normalize) -> tran
     return transforms.Compose(pipeline)
 
 
+def load_class_names(path: str | pathlib.Path, num_classes: int = 251) -> list[str]:
+    names = [""] * num_classes
+    for line in pathlib.Path(path).read_text().splitlines():
+        index, name = line.split(maxsplit=1)
+        names[int(index)] = name.replace('_', ' ')
+    return names
+
+
 def load_val_split(split_path: str | pathlib.Path, name: str) -> set[str] | None:
     # Returns None for 'all' or a missing split file so callers can fall back
     # to the unfiltered val set without a special case at every call site.
@@ -202,6 +220,78 @@ class GeneralizedCrossEntropyLoss(nn.Module):
         probs = torch.softmax(output, dim=1)
         p_y = probs.gather(1, target.unsqueeze(1)).squeeze(1).clamp(min=1e-7)
         return ((1 - p_y.pow(self.q)) / self.q).mean()
+
+
+def load_similarity_pairs(path: str | pathlib.Path, class_names: list[str]) -> list[tuple[int, int]]:
+    # Mirrors load_val_split's missing-file fallback: an empty pair list makes
+    # build_similarity_matrix produce ordinary uniform smoothing, so callers
+    # don't need a special case for "the file hasn't been generated yet".
+    path = pathlib.Path(path)
+    if not path.exists():
+        warnings.warn(f"similarity pairs file not found at '{path}', "
+                       "falling back to ordinary uniform label smoothing")
+        return []
+    name_to_index = {name: index for index, name in enumerate(class_names)}
+    df = pd.read_csv(path)
+    pairs = []
+    for _, row in df.iterrows():
+        class_a, class_b = row['class_a'], row['class_b']
+        if class_a in name_to_index and class_b in name_to_index:
+            pairs.append((name_to_index[class_a], name_to_index[class_b]))
+    return pairs
+
+
+def build_similarity_matrix(
+    num_classes: int,
+    partner_pairs: list[tuple[int, int]],
+    *,
+    smoothing: float = 0.1,
+    partner_frac: float = 0.5,
+) -> torch.Tensor:
+    # Reproduces nn.CrossEntropyLoss(label_smoothing=smoothing)'s exact target
+    # distribution -- q(y) = (1 - eps) + eps/K, q(k != y) = eps/K, i.e. a
+    # uniform blend over *all* K classes including y itself, not eps split
+    # only over the K-1 wrong ones -- when a class has no detected partner,
+    # so this only changes behavior where train-set evidence exists. Where
+    # partners exist, the "wrong class" budget (everything except y's own
+    # eps/K slice of the uniform blend) is reallocated: partner_frac of it
+    # split across the partners, the rest spread uniformly over everyone else.
+    partners: dict[int, set[int]] = {i: set() for i in range(num_classes)}
+    for class_a, class_b in partner_pairs:
+        partners[class_a].add(class_b)
+        partners[class_b].add(class_a)
+
+    y_bonus = smoothing / num_classes
+    others_total = smoothing - y_bonus
+
+    matrix = torch.zeros(num_classes, num_classes)
+    for y in range(num_classes):
+        p = partners[y]
+        others = [k for k in range(num_classes) if k != y and k not in p]
+        if p:
+            matrix[y, list(p)] = (partner_frac * others_total) / len(p)
+            matrix[y, others] = ((1 - partner_frac) * others_total) / len(others)
+        else:
+            matrix[y, others] = others_total / len(others)
+        matrix[y, y] = (1 - smoothing) + y_bonus
+    return matrix
+
+
+class SimilaritySmoothedCrossEntropyLoss(nn.Module):
+    # Ordinary label smoothing spreads its epsilon uniformly over every wrong
+    # class. This instead concentrates part of it on classes independently
+    # confirmed -- via train-set-only confusion, never val-dev, to keep val-dev
+    # clean for model selection -- to be likely near-duplicates of the true
+    # label (e.g. "oyster"/"huitre" are the same food in two languages; see
+    # issue #27 and `benchmarks/analyze_errors.py --split train`).
+    def __init__(self, smoothing_matrix: torch.Tensor) -> None:
+        super().__init__()
+        self.register_buffer('smoothing_matrix', smoothing_matrix)
+
+    def forward(self, output: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        soft_targets = self.smoothing_matrix[target]
+        log_probs = torch.log_softmax(output, dim=1)
+        return -(soft_targets * log_probs).sum(dim=1).mean()
 
 
 best_acc1 = 0
@@ -320,6 +410,12 @@ def main_worker(gpu, ngpus_per_node, args):
     # define loss function (criterion), optimizer, and learning rate scheduler
     if args.loss == 'gce':
         criterion = GeneralizedCrossEntropyLoss(q=args.gce_q).to(device)
+    elif args.loss == 'sim':
+        class_names = load_class_names(pathlib.Path(args.data) / 'meta' / 'class_list.txt')
+        pairs = load_similarity_pairs(args.similarity_pairs, class_names)
+        matrix = build_similarity_matrix(
+            len(class_names), pairs, smoothing=0.1, partner_frac=args.similarity_partner_frac)
+        criterion = SimilaritySmoothedCrossEntropyLoss(matrix).to(device)
     else:
         criterion = nn.CrossEntropyLoss(label_smoothing=0.1).to(device)
 

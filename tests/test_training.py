@@ -8,6 +8,8 @@ from torchvision.transforms import v2
 from main import (
     WARMUP_EPOCHS,
     GeneralizedCrossEntropyLoss,
+    SimilaritySmoothedCrossEntropyLoss,
+    build_similarity_matrix,
     build_train_transform,
     warmup_cosine_lr,
 )
@@ -80,6 +82,70 @@ def test_gce_loss_is_bounded_unlike_cross_entropy() -> None:
     loss = criterion(output, torch.tensor([2]))  # true class is 2
     assert loss.item() < 1 / 0.7 + 1e-3
     assert torch.isfinite(loss)
+
+
+def test_similarity_matrix_rows_sum_to_one() -> None:
+    matrix = build_similarity_matrix(5, [(0, 1)], smoothing=0.1, partner_frac=0.5)
+
+    assert torch.allclose(matrix.sum(dim=1), torch.ones(5), atol=1e-6)
+
+
+def test_similarity_matrix_matches_uniform_smoothing_with_no_partners() -> None:
+    # A class with no detected duplicate is exactly ordinary label smoothing
+    # (nn.CrossEntropyLoss's convention: a uniform blend over *all* K
+    # classes, so the true class also picks up a small eps/K bonus on top of
+    # 1-eps) -- the whole point is this only changes behavior where evidence
+    # exists.
+    matrix = build_similarity_matrix(5, [], smoothing=0.1, partner_frac=0.5)
+
+    expected_row = torch.full((5,), 0.1 / 5)
+    expected_row[2] = 0.9 + 0.1 / 5
+    assert torch.allclose(matrix[2], expected_row, atol=1e-6)
+
+
+def test_similarity_matrix_gives_partners_more_mass_than_non_partners() -> None:
+    # Class 0's only detected partner is class 1; classes 2-4 are unrelated
+    # and should get less smoothing mass each than the partner does.
+    matrix = build_similarity_matrix(5, [(0, 1)], smoothing=0.1, partner_frac=0.5)
+
+    assert matrix[0, 1] > matrix[0, 2]
+    assert matrix[0, 2] == matrix[0, 3] == matrix[0, 4]
+
+
+def test_similarity_matrix_pairs_are_symmetric() -> None:
+    # (0, 1) as a detected pair means each is the other's partner, not just
+    # a one-directional relationship.
+    matrix = build_similarity_matrix(5, [(0, 1)], smoothing=0.1, partner_frac=0.5)
+
+    assert matrix[0, 1] == matrix[1, 0]
+
+
+def test_similarity_smoothed_loss_matches_uniform_smoothing_with_no_partners() -> None:
+    matrix = build_similarity_matrix(4, [], smoothing=0.1)
+    criterion = SimilaritySmoothedCrossEntropyLoss(matrix)
+    reference = nn.CrossEntropyLoss(label_smoothing=0.1)
+    output = torch.randn(3, 4)
+    target = torch.tensor([0, 2, 3])
+
+    assert torch.allclose(criterion(output, target), reference(output, target), atol=1e-5)
+
+
+def test_similarity_smoothed_loss_penalizes_confident_wrong_more_than_confident_correct() -> None:
+    # Like ordinary label smoothing, this never reaches zero even for a
+    # perfectly confident correct prediction -- the smoothing mass keeps a
+    # loss floor that discourages overconfidence by design. What must still
+    # hold is the ranking: confidently wrong costs much more than confidently
+    # right.
+    matrix = build_similarity_matrix(4, [(0, 1)], smoothing=0.1)
+    criterion = SimilaritySmoothedCrossEntropyLoss(matrix)
+    target = torch.tensor([2])
+
+    output_correct = torch.zeros(1, 4)
+    output_correct[0, 2] = 20.0  # confidently predicts the true class
+    output_wrong = torch.zeros(1, 4)
+    output_wrong[0, 0] = 20.0  # confidently predicts a wrong class
+
+    assert criterion(output_correct, target).item() < criterion(output_wrong, target).item()
 
 
 def test_mixup_replaces_hard_targets_with_a_soft_label_over_the_batch() -> None:

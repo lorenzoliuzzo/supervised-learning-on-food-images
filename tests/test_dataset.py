@@ -3,7 +3,13 @@ import pathlib
 import pandas as pd
 from PIL import Image
 
-from main import FoodX251Dataset, dataset_paths, load_val_split
+from main import (
+    FoodX251Dataset,
+    dataset_paths,
+    load_class_names,
+    load_similarity_pairs,
+    load_val_split,
+)
 
 
 def _write_split(
@@ -126,3 +132,52 @@ def test_load_val_split_all_returns_none() -> None:
 
 def test_load_val_split_missing_file_falls_back_to_none(tmp_path: pathlib.Path) -> None:
     assert load_val_split(tmp_path / 'does_not_exist.csv', 'dev') is None
+
+
+def test_load_class_names_parses_index_and_replaces_underscores(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / 'class_list.txt'
+    path.write_text('0 macaron\n1 beef_bourguignonne\n2 club_sandwich\n')
+
+    names = load_class_names(path, num_classes=3)
+
+    assert names == ['macaron', 'beef bourguignonne', 'club sandwich']
+
+
+def test_load_similarity_pairs_maps_names_to_indices(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / 'possible_duplicate_classes.csv'
+    pd.DataFrame({
+        'class_a': ['oyster', 'chicken wing'],
+        'class_b': ['huitre', 'buffalo wing'],
+        'a_to_b': [76, 75],
+        'b_to_a': [92, 91],
+        'symmetric_rate': [0.143, 0.170],
+    }).to_csv(path, index=False)
+    class_names = ['oyster', 'huitre', 'chicken wing', 'buffalo wing', 'macaron']
+
+    pairs = load_similarity_pairs(path, class_names)
+
+    assert pairs == [(0, 1), (2, 3)]
+
+
+def test_load_similarity_pairs_skips_names_not_in_the_class_list(tmp_path: pathlib.Path) -> None:
+    # A pairs file built against a different class_list.txt (or a stale one)
+    # should not crash training -- silently drop what can't be mapped.
+    path = tmp_path / 'possible_duplicate_classes.csv'
+    pd.DataFrame({
+        'class_a': ['oyster', 'unknown food'],
+        'class_b': ['huitre', 'macaron'],
+        'a_to_b': [76, 1],
+        'b_to_a': [92, 1],
+        'symmetric_rate': [0.143, 0.1],
+    }).to_csv(path, index=False)
+    class_names = ['oyster', 'huitre', 'macaron']
+
+    pairs = load_similarity_pairs(path, class_names)
+
+    assert pairs == [(0, 1)]
+
+
+def test_load_similarity_pairs_missing_file_falls_back_to_empty(tmp_path: pathlib.Path) -> None:
+    pairs = load_similarity_pairs(tmp_path / 'does_not_exist.csv', ['oyster', 'huitre'])
+
+    assert pairs == []

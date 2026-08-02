@@ -29,18 +29,10 @@ from sklearn.metrics import classification_report, confusion_matrix  # noqa: E40
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from main import FoodX251Dataset, dataset_paths, load_val_split  # noqa: E402
+from main import FoodX251Dataset, dataset_paths, load_class_names, load_val_split  # noqa: E402
 from model import FoodCNN  # noqa: E402
 
 NUM_CLASSES = 251
-
-
-def load_class_names(path: Path, num_classes: int = NUM_CLASSES) -> list[str]:
-    names = [""] * num_classes
-    for line in path.read_text().splitlines():
-        index, name = line.split(maxsplit=1)
-        names[int(index)] = name.replace("_", " ")
-    return names
 
 
 def top_confused_pairs(
@@ -190,9 +182,11 @@ def main() -> None:
     parser.add_argument("checkpoint", type=Path)
     parser.add_argument("data", nargs="?", default="food251", type=Path)
     parser.add_argument("--val-split", default="splits/val_split.csv", type=Path)
-    parser.add_argument("--split", default="dev", choices=["dev", "test"],
+    parser.add_argument("--split", default="dev", choices=["dev", "test", "train"],
                          help="val-test should only be touched once, for the report's "
-                              "headline number -- default is val-dev")
+                              "headline number -- default is val-dev. 'train' runs "
+                              "against the full training set instead, e.g. to build a "
+                              "similarity prior from train-only evidence (see #27)")
     parser.add_argument("--batch-size", default=256, type=int)
     parser.add_argument("--workers", default=8, type=int)
     parser.add_argument("--device", default="cpu", choices=["cpu", "cuda"],
@@ -215,16 +209,22 @@ def main() -> None:
     model.to(device)
 
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    _, (val_dir, val_labels) = dataset_paths(args.data)
+    (train_dir, train_labels), (val_dir, val_labels) = dataset_paths(args.data)
+    if args.split == "train":
+        # No val_split.csv subset concept on the train side -- every image
+        # in train_labels.csv is in scope.
+        image_dir, label_file, subset = train_dir, train_labels, None
+    else:
+        image_dir, label_file, subset = val_dir, val_labels, load_val_split(args.val_split, args.split)
     dataset = FoodX251Dataset(
-        val_dir, val_labels,
+        image_dir, label_file,
         transforms.Compose([
             transforms.Resize(256),
             transforms.CenterCrop(224),
             transforms.ToTensor(),
             normalize,
         ]),
-        subset=load_val_split(args.val_split, args.split),
+        subset=subset,
     )
     loader = torch.utils.data.DataLoader(
         dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.workers)

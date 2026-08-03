@@ -1,6 +1,6 @@
 # Training roadmap
 
-**Status:** Phases A, B, C done; smoke test converged at 61.57% val-dev top-1; trunk decided (baseline, provisional); Phase D recipe search done — lr=0.8, plain recipe (no augmentation/Mixup/CutMix/EMA) carries forward, nothing tested beat it (see Phase D for the matched-epoch rematch and why GCE/EMA's poor showings aren't final verdicts); Phase C addendum done — nothing below baseline or in the head beats it either, and the accuracy floor is now bracketed between 1.68M and 5.18M; **no run has ever been seeded (#33)**, so every "single seed" caveat below understates the uncertainty; batch-size sweep done — 160/256/512 statistically tied, batch stays 256; RandomResizedCrop scale-floor proxy done — closing the train/val gap doesn't buy accuracy, 0.08 default stays; the single 90-epoch full run is next, launching now · **Baseline `main`:** `820f347` · **Last measured:** 2026-08-02
+**Status:** Phases A-D done, including the addendum and the single 90-epoch full run — **63.83% val-test top-1 / 81.79% top-3 / 87.39% top-5**, the report's headline number (`checkpoints/full-90ep-lr0.8-best.pth.tar`, epoch 86); baseline trunk, GAP head, plain recipe, lr=0.8, batch 256, crop-scale-min 0.08, all unmodified from what this phase settled on. Everything under baseline (narrower trunks, alternate pooling heads, batch size 160/256/512, crop-scale 0.25/0.40, six regularization axes total) was proxied and none beat it. **No run has ever been seeded (#33)**, including this one — every accuracy figure in this file is a point estimate, not an exactly reproducible one. Only Phase E (self-supervised track) and the report remain · **Baseline `main`:** `820f347` · **Last measured:** 2026-08-03
 
 Every number here was measured on the project box (RTX 5050 Laptop, 8 GB VRAM,
 16 threads) at 176 px / bf16 / `channels_last`, in `performance` power profile,
@@ -497,8 +497,60 @@ recipe are both decided.
       with an LR mismatch rather than GCE being unsuitable for this
       dataset's label noise. Not reopening without a dedicated LR search for
       GCE, which hasn't been budgeted.
-- [ ] **One** 90-epoch run at 176 px, evaluated with FixRes-style test-resolution
+- [x] **One** 90-epoch run at 176 px, evaluated with FixRes-style test-resolution
       correction (train 176, test 224 centre crop).
+
+      Baseline trunk, GAP head, plain recipe, lr=0.8, batch 256, crop-scale-min
+      0.08 — every setting this phase and its addendum settled on, unmodified.
+      `python src/main.py food251 --epochs 90 --lr 0.8 -b 256
+      --run-label full-90ep-lr0.8 --log-dir runs/final`. The FixRes correction
+      needed no extra flag: `main.py` already validates at `Resize(256)` +
+      `CenterCrop(224)` while training at 176, by default.
+
+      | | top-1 | top-3 | top-5 |
+      | --- | --- | --- | --- |
+      | val-dev, best (epoch 86) | **64.36%** | 82.22% | 87.51% |
+      | val-dev, final (epoch 90) | 64.26% | 82.14% | 87.61% |
+      | **val-test (headline, touched once)** | **63.83%** | **81.79%** | **87.39%** |
+
+      2h05m wall clock, 1.99 GiB peak VRAM, `model_best.pth.tar` at epoch 86
+      kept per the smoke test's own convention — though here best and final are
+      within 0.1 points of each other, not the ~0.5-point gap the smoke test
+      saw, which is itself evidence the model is no longer overfitting late in
+      training (see below). Val-test lands 0.5 points under val-dev's best,
+      the expected direction since val-dev drove checkpoint selection, and a
+      small enough gap that the split isn't doing anything unusual.
+
+      **Up 2.3 points on the smoke test's 61.57%** (pre-Phase-D default lr=0.1,
+      no crop/batch/head tuning), at the same trunk and epoch count — the
+      full recipe search bought a real, if modest, gain. **Continues the
+      15/30/90-epoch trend cleanly**: 55.6% to 61.3% to 63.8% (val-test) /
+      64.4% (val-dev, best) — diminishing but still real returns from length
+      alone, as the cosine schedule design implies.
+
+      **Confirms the underfitting diagnosis the crop-scale investigation was
+      built on.** Train top-1 at the final epoch was 64.88%, val top-1 64.26%
+      — the +11.05-point val-over-train gap measured at epoch 15, and the
+      +7.3-point gap at epoch 30, has closed to near zero by epoch 90. The
+      model needed the full 90-epoch schedule to converge; nothing tested in
+      this phase sped that up, and per the crop-scale result, nothing needed
+      to — the "regularization" axes were mostly not costing convergence, the
+      schedule length was.
+
+      **No thermal slowdown this time.** The smoke test saw per-batch time
+      rise from 0.16s to 0.26s past epoch 60 under a lower GPU power cap;
+      this run held steady at 0.147-0.169s/step at epochs 5, 30, 60 and 89
+      alike, after the box was switched to its high-performance power
+      profile partway through a related proxy run earlier this phase. Not
+      isolated as a controlled comparison, but consistent with the smoke
+      test's own read that the slowdown was a power-cap effect, not a hard
+      thermal limit.
+
+      **Caveat carried from #33: this run was not seeded**, consistent with
+      every other run in this project, kept that way rather than risk
+      `cudnn.deterministic`'s unmeasured slowdown on the single most
+      expensive run so far. The headline number above is a point estimate,
+      not an exactly reproducible one.
 - [ ] Optional, cheap to measure: `torch.compile`.
 
 ## Phase E — self-supervised track (~18 GPU-h)

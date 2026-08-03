@@ -203,6 +203,17 @@ def load_val_split(split_path: str | pathlib.Path, name: str) -> set[str] | None
     return set(df.loc[df['split'] == name, 'img_name'])
 
 
+def select_amp_dtype(device: torch.device) -> torch.dtype:
+    # bf16 Tensor Core support needs Ampere (compute capability 8.0). On an
+    # older card -- e.g. Colab's free-tier Tesla T4, cc 7.5 -- autocast(bfloat16)
+    # doesn't error, it just runs unaccelerated, which cost a measured 12x on
+    # that hardware. fp16 needs a GradScaler (see main_worker); bf16 doesn't.
+    if device.type != 'cuda':
+        return torch.bfloat16
+    major, _ = torch.cuda.get_device_capability(device)
+    return torch.bfloat16 if major >= 8 else torch.float16
+
+
 WARMUP_EPOCHS = 5
 
 
@@ -427,6 +438,11 @@ def main_worker(gpu, ngpus_per_node, args):
 
     summary(model, input_size=(3, 224, 224))
 
+    amp_dtype = select_amp_dtype(device)
+    scaler = torch.amp.GradScaler('cuda', enabled=device.type == 'cuda' and amp_dtype is torch.float16)
+    if device.type == 'cuda':
+        print(f"=> autocast dtype: {amp_dtype} (compute capability {torch.cuda.get_device_capability(device)})")
+
     # define loss function (criterion), optimizer, and learning rate scheduler
     if args.loss == 'gce':
         criterion = GeneralizedCrossEntropyLoss(q=args.gce_q).to(device)
@@ -521,7 +537,7 @@ def main_worker(gpu, ngpus_per_node, args):
         num_workers=args.workers, pin_memory=True, sampler=val_sampler, persistent_workers=True)
 
     if args.evaluate:
-        validate(val_loader, model, criterion, args)
+        validate(val_loader, model, criterion, args, amp_dtype)
         return
 
     run = RunLog(label=args.run_label, config=vars(args) | {'val_subset_size': len(val_dataset)})
@@ -538,10 +554,11 @@ def main_worker(gpu, ngpus_per_node, args):
         # train for one epoch
         lr_used = optimizer.param_groups[0]['lr']
         train_loss, train_acc1, train_acc3, train_acc5 = train(
-            train_loader, model, criterion, optimizer, epoch, device, args, ema_model=ema_model)
+            train_loader, model, criterion, optimizer, epoch, device, args,
+            amp_dtype, scaler, ema_model=ema_model)
 
         # evaluate on validation set
-        acc1, acc3, acc5 = validate(val_loader, eval_model, criterion, args)
+        acc1, acc3, acc5 = validate(val_loader, eval_model, criterion, args, amp_dtype)
         run.record(epoch, lr_used, train_loss, train_acc1, train_acc3, train_acc5, acc1, acc3, acc5)
 
         scheduler.step()
@@ -569,7 +586,7 @@ def main_worker(gpu, ngpus_per_node, args):
     print(f"=> wrote run log to '{log_path}'")
 
 
-def train(train_loader, model, criterion, optimizer, epoch, device, args, ema_model=None):
+def train(train_loader, model, criterion, optimizer, epoch, device, args, amp_dtype, scaler, ema_model=None):
     
     use_accel = not args.no_accel and torch.accelerator.is_available()
 
@@ -612,9 +629,7 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args, ema_mo
             images, target = mixer(images, target)
 
         # compute output
-        # bf16 needs no GradScaler: unlike fp16 its exponent range already
-        # covers gradient magnitudes, so the scaler would be pure overhead.
-        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == 'cuda'):
+        with torch.autocast(device.type, dtype=amp_dtype, enabled=device.type == 'cuda'):
             output = model(images)
             loss = criterion(output, target)
 
@@ -626,9 +641,13 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args, ema_mo
         top5.update(acc5[0], images.size(0))
 
         # compute gradient and do SGD step
+        # scaler is a no-op when amp_dtype is bfloat16 (enabled=False in that
+        # case): bf16's exponent range already covers gradient magnitudes, so
+        # only fp16 -- the fallback on pre-Ampere cards -- needs loss scaling.
         optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
         if ema_model is not None:
             ema_model.update_parameters(model)
 
@@ -642,7 +661,7 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args, ema_mo
     return losses.avg, float(top1.avg), float(top3.avg), float(top5.avg)
 
 
-def validate(val_loader, model, criterion, args):
+def validate(val_loader, model, criterion, args, amp_dtype):
 
     use_accel = not args.no_accel and torch.accelerator.is_available()
 
@@ -669,7 +688,7 @@ def validate(val_loader, model, criterion, args):
                         images = images.to(memory_format=torch.channels_last)
 
                 # compute output
-                with torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == 'cuda'):
+                with torch.autocast(device.type, dtype=amp_dtype, enabled=device.type == 'cuda'):
                     output = model(images)
                     loss = criterion(output, target)
 

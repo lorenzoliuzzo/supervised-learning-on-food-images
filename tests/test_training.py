@@ -11,9 +11,33 @@ from main import (
     SimilaritySmoothedCrossEntropyLoss,
     build_similarity_matrix,
     build_train_transform,
+    select_amp_dtype,
     warmup_cosine_lr,
 )
 from model import FoodCNN
+
+
+def test_select_amp_dtype_is_bf16_on_cpu() -> None:
+    # No capability to check on CPU -- autocast there is only ever a no-op
+    # (enabled=device.type == 'cuda' at every call site), so the dtype choice
+    # is irrelevant; bf16 keeps this branch from calling the CUDA-only API.
+    assert select_amp_dtype(torch.device("cpu")) is torch.bfloat16
+
+
+@pytest.mark.parametrize(
+    ("capability", "expected"),
+    [
+        ((8, 0), torch.bfloat16),  # Ampere: bf16 Tensor Cores exist
+        ((9, 0), torch.bfloat16),  # Hopper: still >= 8.0
+        ((7, 5), torch.float16),  # Turing (e.g. Colab's Tesla T4): no bf16 Tensor Cores
+        ((6, 1), torch.float16),  # Pascal: further below the bf16 cutoff
+    ],
+)
+def test_select_amp_dtype_matches_compute_capability(
+    monkeypatch: pytest.MonkeyPatch, capability: tuple[int, int], expected: torch.dtype
+) -> None:
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device=None: capability)
+    assert select_amp_dtype(torch.device("cuda")) is expected
 
 
 def test_single_batch_overfit_gate() -> None:

@@ -29,6 +29,7 @@ from main import (  # noqa: E402
     FoodX251Dataset,
     dataset_paths,
     load_val_split,
+    select_amp_dtype,
     train,
     validate,
     warmup_cosine_lr,
@@ -44,20 +45,21 @@ PHASE_C_KEYS = ["baseline", "deep-4", "deep-6", "5stage"]
 
 
 def predict_correct(
-    loader: torch.utils.data.DataLoader, model: nn.Module, device: torch.device
+    loader: torch.utils.data.DataLoader, model: nn.Module, device: torch.device, amp_dtype: torch.dtype
 ) -> np.ndarray:
-    # bf16, matching training, where validate() above scores in fp32. On a
-    # 6,063-image val-dev that moves a couple of borderline images, so this
-    # vector's mean can sit ~0.03 points off the logged val_acc1. Every vector
-    # is produced here the same way, so pairing two of them is consistent;
-    # pairing one against a checkpoint re-scored in fp32 is not, which is why
-    # the control leg gets re-run through this sweep rather than reused.
+    # Matching training's autocast dtype, where validate() above scores in
+    # fp32. On a 6,063-image val-dev that moves a couple of borderline images,
+    # so this vector's mean can sit ~0.03 points off the logged val_acc1. Every
+    # vector is produced here the same way, so pairing two of them is
+    # consistent; pairing one against a checkpoint re-scored in fp32 is not,
+    # which is why the control leg gets re-run through this sweep rather than
+    # reused.
     model.eval()
     correct: list[np.ndarray] = []
     with torch.no_grad():
         for images, target in loader:
             images = images.to(device, non_blocking=True, memory_format=torch.channels_last)
-            with torch.autocast("cuda", dtype=torch.bfloat16):
+            with torch.autocast("cuda", dtype=amp_dtype):
                 preds = model(images).argmax(dim=1)
             correct.append((preds.cpu() == target).numpy().astype(np.int8))
     return np.concatenate(correct)
@@ -77,6 +79,9 @@ def run_proxy(
     device = torch.device("cuda")
     model = variant.build().to(device, memory_format=torch.channels_last)
     torch.cuda.reset_peak_memory_stats()
+
+    amp_dtype = select_amp_dtype(device)
+    scaler = torch.amp.GradScaler("cuda", enabled=amp_dtype is torch.float16)
 
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1).to(device)
     optimizer = torch.optim.SGD(model.parameters(), lr, momentum=0.9,
@@ -136,8 +141,8 @@ def run_proxy(
         started = time.perf_counter()
         lr_used = optimizer.param_groups[0]['lr']
         train_loss, train_acc1, train_acc3, train_acc5 = train(
-            train_loader, model, criterion, optimizer, epoch, device, args)
-        val_acc1, val_acc3, val_acc5 = validate(val_loader, model, criterion, args)
+            train_loader, model, criterion, optimizer, epoch, device, args, amp_dtype, scaler)
+        val_acc1, val_acc3, val_acc5 = validate(val_loader, model, criterion, args, amp_dtype)
         run.record(epoch, lr_used, train_loss, train_acc1, train_acc3, train_acc5,
                    val_acc1, val_acc3, val_acc5)
         scheduler.step()
@@ -156,7 +161,7 @@ def run_proxy(
     # keep checkpoints around -- which it deliberately doesn't, and which
     # wouldn't load into FoodCNN anyway once the head or widths differ.
     predictions_path = log_dir / f"{variant.key}-correct.npy"
-    np.save(predictions_path, predict_correct(val_loader, model, device))
+    np.save(predictions_path, predict_correct(val_loader, model, device, amp_dtype))
     print(f"  -> {predictions_path}")
 
     final = run.history[-1]

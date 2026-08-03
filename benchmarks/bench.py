@@ -15,6 +15,7 @@ class Throughput:
     params: int
     images_per_second: float
     peak_gib: float
+    dtype: torch.dtype
 
     @property
     def minutes_per_epoch(self) -> float:
@@ -22,6 +23,16 @@ class Throughput:
 
     def hours(self, epochs: int) -> float:
         return epochs * TRAIN_IMAGES / self.images_per_second / 3600
+
+
+def amp_dtype() -> torch.dtype:
+    # bf16 Tensor Core support needs Ampere (compute capability 8.0); on an
+    # older card -- e.g. Colab's free-tier Tesla T4, cc 7.5 -- autocast(bfloat16)
+    # doesn't error, it just runs unaccelerated, which measured 12x slower on
+    # that hardware. Picking the dtype per-GPU is what makes this script's
+    # numbers honest off this box.
+    major, _ = torch.cuda.get_device_capability()
+    return torch.bfloat16 if major >= 8 else torch.float16
 
 
 def measure(
@@ -51,17 +62,22 @@ def measure(
 
     model = model.cuda().to(memory_format=torch.channels_last)
     params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    dtype = amp_dtype()
     optimizer = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
+    scaler = torch.amp.GradScaler("cuda", enabled=dtype is torch.float16)
     criterion = nn.CrossEntropyLoss()
     images = torch.randn(batch, 3, size, size, device="cuda").to(memory_format=torch.channels_last)
     target = torch.randint(0, 251, (batch,), device="cuda")
 
     def step() -> None:
         optimizer.zero_grad(set_to_none=True)
-        # bf16 needs no GradScaler; on this GPU fp16's scaler is pure overhead.
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            criterion(model(images), target).backward()
-        optimizer.step()
+        # scaler is a no-op when dtype is bfloat16 (enabled=False in that
+        # case); only fp16, the fallback on pre-Ampere GPUs, needs loss scaling.
+        with torch.autocast("cuda", dtype=dtype):
+            loss = criterion(model(images), target)
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
 
     torch.cuda.reset_peak_memory_stats()
     for _ in range(warmup):
@@ -76,12 +92,13 @@ def measure(
         torch.cuda.synchronize()
         best = max(best, steps * batch / (time.perf_counter() - started))
 
-    return Throughput(params, best, torch.cuda.max_memory_allocated() / 2**30)
+    return Throughput(params, best, torch.cuda.max_memory_allocated() / 2**30, dtype)
 
 
 def report(label: str, result: Throughput, epochs: int = 90) -> None:
+    dtype_name = str(result.dtype).removeprefix("torch.")
     print(
         f"  {label:36s} {result.params / 1e6:5.2f}M  {result.images_per_second:6.0f} img/s  "
         f"{result.minutes_per_epoch:4.1f} min/ep  {result.hours(epochs):4.1f} h/{epochs}ep  "
-        f"peak {result.peak_gib:.2f} GiB"
+        f"peak {result.peak_gib:.2f} GiB  {dtype_name}"
     )

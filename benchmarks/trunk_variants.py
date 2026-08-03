@@ -15,7 +15,7 @@ import torch.nn as nn
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from bench import BUDGET, measure, report  # noqa: E402
+from bench import BUDGET, amp_dtype, measure, report  # noqa: E402
 
 from model import FoodCNN, ResidualBlock  # noqa: E402
 
@@ -194,7 +194,8 @@ BY_KEY: dict[str, Variant] = {v.key: v for v in VARIANTS}
 
 def main() -> None:
     census()
-    print(f"{SIZE} px, batch {BATCH}, bf16 + channels_last, budget {BUDGET:,}\n")
+    dtype_name = str(amp_dtype()).removeprefix("torch.")
+    print(f"{SIZE} px, batch {BATCH}, {dtype_name} + channels_last, budget {BUDGET:,}\n")
     for variant in VARIANTS:
         model = variant.build()
         params = sum(p.numel() for p in model.parameters() if p.requires_grad)

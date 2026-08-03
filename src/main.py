@@ -85,6 +85,12 @@ parser.add_argument('--run-label', default='run', type=str,
                     help='human-readable tag for this run, used in the log filename')
 parser.add_argument('--log-dir', default='runs', type=str,
                     help='directory per-run JSON logs are written to')
+parser.add_argument('--init-encoder', default='', type=str, metavar='PATH',
+                    help='path to a simsiam.py checkpoint (Phase E) to seed the trunk '
+                         'from -- only features/avgpool weights are copied, the '
+                         'classifier stays randomly initialized. Mutually exclusive '
+                         'with --resume: this starts a new supervised run from '
+                         'pretrained weights, --resume continues an existing one.')
 parser.add_argument('--augment', default='none', choices=['none', 'trivial', 'rand'],
                     help='extra train-time augmentation policy on top of crop+flip '
                          '(default: none)')
@@ -305,6 +311,11 @@ best_acc1 = 0
 def main():
     args = parser.parse_args()
 
+    if args.init_encoder and args.resume:
+        parser.error('--init-encoder and --resume are mutually exclusive: '
+                     '--init-encoder starts a new run from pretrained weights, '
+                     '--resume continues an existing one')
+
     if args.seed is not None:
         random.seed(args.seed)
         torch.manual_seed(args.seed)
@@ -378,7 +389,10 @@ def main_worker(gpu, ngpus_per_node, args):
     
     print("=> creating custom model")
     model = FoodCNN(num_classes=251)
-    
+
+    if args.init_encoder:
+        load_encoder_weights(model, args.init_encoder)
+
     if not use_accel:
         print('using CPU, this will be slow')
     elif args.distributed:
@@ -703,6 +717,24 @@ def validate(val_loader, model, criterion, args):
     progress.display_summary()
 
     return float(top1.avg), float(top3.avg), float(top5.avg)
+
+
+def load_encoder_weights(model: nn.Module, checkpoint_path: str) -> None:
+    # A simsiam.py checkpoint's state_dict keys are prefixed `encoder.` (the
+    # FoodCNN instance SimSiamModel wraps) -- but that FoodCNN carries its
+    # own unused classifier too, so filtering on the `encoder.` prefix alone
+    # would smuggle those weights in as well. `encoder.features.` is the
+    # trunk specifically (avgpool has no parameters of its own).
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    state_dict = checkpoint['state_dict']
+    encoder_state = {
+        key[len('encoder.'):]: value
+        for key, value in state_dict.items()
+        if key.startswith('encoder.features.')
+    }
+    missing, unexpected = model.load_state_dict(encoder_state, strict=False)
+    print(f"=> loaded encoder weights from '{checkpoint_path}' "
+          f"({len(encoder_state)} tensors; missing={len(missing)}, unexpected={len(unexpected)})")
 
 
 def save_checkpoint(state, is_best, filename):

@@ -121,8 +121,14 @@ class FoodCNN(nn.Module):
             nn.ReLU(inplace=True)
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward_features(self, x: torch.Tensor) -> torch.Tensor:
+        # Pooled, flattened 512-d embedding before the classifier head --
+        # what SimSiam's projector attaches to (src/simsiam.py).
         x = self.features(x)
         x = self.avgpool(x)
+        return torch.flatten(x, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.forward_features(x)
         x = self.classifier(x)
         return x

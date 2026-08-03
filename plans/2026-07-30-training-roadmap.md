@@ -1,6 +1,6 @@
 # Training roadmap
 
-**Status:** Phases A-D done, including the addendum and the single 90-epoch full run — **63.83% val-test top-1 / 81.79% top-3 / 87.39% top-5**, the report's headline number (`checkpoints/full-90ep-lr0.8-best.pth.tar`, epoch 86); baseline trunk, GAP head, plain recipe, lr=0.8, batch 256, crop-scale-min 0.08, all unmodified from what this phase settled on. Everything under baseline (narrower trunks, alternate pooling heads, batch size 160/256/512, crop-scale 0.25/0.40, six regularization axes total) was proxied and none beat it. **No run has ever been seeded (#33)**, including this one — every accuracy figure in this file is a point estimate, not an exactly reproducible one. Only Phase E (self-supervised track) and the report remain · **Baseline `main`:** `820f347` · **Last measured:** 2026-08-03
+**Status:** Phases A-D done, including the addendum and the single 90-epoch full run — **63.83% val-test top-1 / 81.79% top-3 / 87.39% top-5**, the report's headline number (`checkpoints/full-90ep-lr0.8-best.pth.tar`, epoch 86); baseline trunk, GAP head, plain recipe, lr=0.8, batch 256, crop-scale-min 0.08, all unmodified from what this phase settled on. Everything under baseline (narrower trunks, alternate pooling heads, batch size 160/256/512, crop-scale 0.25/0.40, six regularization axes total) was proxied and none beat it. **No run has ever been seeded (#33)**, including this one — every accuracy figure in this file is a point estimate, not an exactly reproducible one. Phase E (self-supervised track) and the report remain; Phase E's SimSiam scaffolding (`src/simsiam.py`, `main.py --init-encoder`, `notebooks/colab_gpu_probe.ipynb`) landed 2026-08-03, no pretraining run has happened yet · **Baseline `main`:** `820f347` · **Last measured:** 2026-08-03
 
 Every number here was measured on the project box (RTX 5050 Laptop, 8 GB VRAM,
 16 threads) at 176 px / bf16 / `channels_last`, in `performance` power profile,
@@ -561,14 +561,36 @@ finetune, ~8 h for the control. This is more GPU time than the entire rest of th
 plan combined, and it is deliberate — it keeps the result comparable to the
 published SimSiam/BYOL settings instead of inviting "you under-trained it".
 
+**SimSiam over BYOL, decided 2026-08-03**: no momentum/target encoder to add
+(no second ~6.5M-param shadow copy of `FoodCNN` sitting in VRAM), no EMA-decay
+schedule to tune, and the original recipe matches this project's batch sizes
+without a large-batch trick like LARS. Scaffolding is in: `src/simsiam.py`
+(`ProjectionMLP`/`PredictionMLP`/`SimSiamModel`, negative cosine similarity
+loss with stop-gradient, `TwoCropsTransform` + SimSiam's augmentation recipe,
+checkpointed every epoch and resumable via `--resume`, same pattern as
+`main.py`); `FoodCNN.forward_features` (`src/model.py`) exposes the pooled
+512-d trunk output the projector attaches to, no parameter-budget impact;
+`main.py --init-encoder PATH` loads only the pretrained trunk into a fresh
+`FoodCNN` for the finetune half (mutually exclusive with `--resume`). Covered
+by `tests/test_simsiam.py`, all on random tensors per this project's
+no-dataset-in-tests rule.
+
 - [ ] Pretrain 200 epochs at 176 px, then finetune at 176.
 - [ ] **The control is not optional**: SSL-pretrain + finetune must be compared
       against spending those same GPU-hours on longer supervised training.
       Without it the result is uninterpretable.
-- [ ] Checkpoint pretraining often enough that an interrupted 8 h run is
+- [x] Checkpoint pretraining often enough that an interrupted 8 h run is
       resumable — at this length that is a practical requirement, not a nicety.
 
 SimCLR is excluded — it degrades below ~1k batch, unreachable in 8 GB.
+
+**Where to run it**: `notebooks/colab_gpu_probe.ipynb` benchmarks
+`FoodCNN` on whatever GPU Colab assigns that session, using
+`benchmarks/bench.py::measure` unchanged (synthetic batches, no dataset
+needed) at the same settings behind the 1688 img/s local baseline above —
+its printed speedup multiplier is what decides whether the 200-epoch
+pretrain runs locally or there. Not run yet; needs a manual pass on
+colab.research.google.com before its numbers can be trusted.
 
 ## Phase F — report
 

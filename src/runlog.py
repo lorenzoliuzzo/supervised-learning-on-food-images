@@ -13,12 +13,13 @@ class EpochRecord:
     epoch: int
     lr: float
     train_loss: float
-    train_acc1: float
-    train_acc3: float
-    train_acc5: float
-    val_acc1: float
-    val_acc3: float
-    val_acc5: float
+    # None for SSL runs (record_ssl), which have no classification accuracy.
+    train_acc1: float | None = None
+    train_acc3: float | None = None
+    train_acc5: float | None = None
+    val_acc1: float | None = None
+    val_acc3: float | None = None
+    val_acc5: float | None = None
 
 
 @dataclass
@@ -50,6 +51,11 @@ class RunLog:
             EpochRecord(epoch, lr, train_loss, train_acc1, train_acc3, train_acc5,
                         val_acc1, val_acc3, val_acc5)
         )
+
+    def record_ssl(self, epoch: int, lr: float, loss: float) -> None:
+        # SimSiam pretraining (src/simsiam.py) has no classification accuracy
+        # to log -- the six acc fields stay at their None default.
+        self.history.append(EpochRecord(epoch, lr, loss))
 
     def save(self, directory: Path, *, peak_vram_gib: float = 0.0) -> Path:
         directory.mkdir(parents=True, exist_ok=True)

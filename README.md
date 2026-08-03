@@ -10,10 +10,12 @@ than 10M parameters that classifies the 251 classes of the
 |---|---|
 | `src/model.py` | `FoodCNN`, the from-scratch architecture under the 10M-parameter budget |
 | `src/main.py` | Training / evaluation entry point |
+| `src/simsiam.py` | SimSiam self-supervised pretraining (Phase E) |
 | `src/resnet.py` | The PyTorch ImageNet reference script, kept as a baseline |
 | `src/food101.py` | Food-101 experiments |
 | `src/main.ipynb` | Exploratory notebook |
 | `benchmarks/` | Throughput and parameter measurements backing the plans |
+| `notebooks/` | Colab notebooks (GPU throughput probe for Phase E) |
 | `plans/` | Dated roadmaps |
 | `report/` | Typst report sources and built PDF |
 

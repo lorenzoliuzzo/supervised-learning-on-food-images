@@ -561,6 +561,25 @@ finetune, ~8 h for the control. This is more GPU time than the entire rest of th
 plan combined, and it is deliberate — it keeps the result comparable to the
 published SimSiam/BYOL settings instead of inviting "you under-trained it".
 
+**Colab's free-tier Tesla T4 is a viable second venue for this phase's 8 GPU-h,
+once measured honestly.** `benchmarks/bench.py` hardcoded `autocast(dtype=
+torch.bfloat16)`; bf16 Tensor Cores need Ampere (compute capability >= 8.0),
+and the T4 is cc 7.5, so the first Colab run silently executed bf16
+unaccelerated — 130 img/s, a false 0.08x of this box's throughput. Fixed
+(#39) by picking the autocast dtype from `torch.cuda.get_device_capability`
+(bf16 on Ampere+, fp16 with a GradScaler otherwise). Re-measured on the same
+T4 with the fix: baseline `FoodCNN`, 176 px / batch 160 / float16 —
+**1953 img/s, 1.0 min/ep, 1.5 h/90ep, peak 1.92 GiB — 1.16x this box's 1688
+img/s** (T4 has full fp16 Tensor Core support, and wasn't seen throttling the
+way this box's `SW_POWER_CAP` does under sustained load). Phase E's 200-epoch
+pretrain estimate drops to **~3.4 h there vs ~3.9 h here** — close enough to
+be a wash rather than a reason to prefer one venue outright. Caveats before
+committing an unattended 8 h run to it: this was a short synthetic-batch
+benchmark, not a full run, so it says nothing about Colab-side thermal
+throttling over hours; and free-tier Colab sessions can disconnect or hit
+their runtime cap mid-run, which this box does not risk — Phase E's
+checkpoint-resumability requirement (below) matters more there than here.
+
 - [ ] Pretrain 200 epochs at 176 px, then finetune at 176.
 - [ ] **The control is not optional**: SSL-pretrain + finetune must be compared
       against spending those same GPU-hours on longer supervised training.

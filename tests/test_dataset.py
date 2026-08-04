@@ -1,15 +1,44 @@
 import pathlib
 
 import pandas as pd
+import torch
 from PIL import Image
+from torchvision.transforms import Normalize
 
 from main import (
     FoodX251Dataset,
+    build_train_transform,
     dataset_paths,
+    eval_resolution,
     load_class_names,
     load_similarity_pairs,
     load_val_split,
 )
+
+
+def test_eval_resolution_default_reproduces_the_measured_pipeline() -> None:
+    # Every accuracy in plans/ was measured training at 176 and validating at
+    # Resize(256)/CenterCrop(224). If --crop-size's default ever stops
+    # reproducing that pair exactly, those numbers stop being comparable.
+    assert eval_resolution(176) == (256, 224)
+
+
+def test_eval_resolution_scales_up_with_the_train_crop() -> None:
+    resize, crop = eval_resolution(224)
+    assert crop > 224
+    assert resize > crop
+
+
+def test_train_transform_honours_the_crop_size() -> None:
+    normalize = Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    image = Image.new('RGB', (400, 400))
+
+    default_view = build_train_transform('none', normalize)(image)
+    larger_view = build_train_transform('none', normalize, crop_size=224)(image)
+
+    assert isinstance(default_view, torch.Tensor)
+    assert default_view.shape == (3, 176, 176)
+    assert larger_view.shape == (3, 224, 224)
 
 
 def _write_split(

@@ -101,6 +101,11 @@ parser.add_argument('--crop-scale-min', default=0.08, type=float,
                          'fraction of the image a train view may be cropped from. '
                          '0.08 is the ImageNet default inherited from the reference '
                          'script and is aggressive for 90k images (default: 0.08)')
+parser.add_argument('--crop-size', default=176, type=int, metavar='N',
+                    help='train-time RandomResizedCrop size. Validation resolution '
+                         'scales with it (see eval_resolution), keeping the FixRes '
+                         'correction every measured number already includes '
+                         '(default: 176)')
 parser.add_argument('--ema', action='store_true',
                     help='track an exponential moving average of weights and '
                          'validate against it instead of the raw weights')
@@ -165,13 +170,25 @@ def dataset_paths(
     return train, val
 
 
+def eval_resolution(crop_size: int) -> tuple[int, int]:
+    # FixRes: RandomResizedCrop makes objects look larger at train time than a
+    # centre crop does at test time, and evaluating higher corrects the shift.
+    # main.py has always trained at 176 and evaluated at Resize(256)/Crop(224);
+    # this preserves that exact pair at crop_size=176 and carries the same
+    # ratio to any other resolution, so --crop-size can't silently un-apply a
+    # correction every measured number in the roadmap already includes.
+    eval_crop = round(crop_size * 224 / 176 / 16) * 16
+    return round(eval_crop * 256 / 224), eval_crop
+
+
 def build_train_transform(augment: str, normalize: transforms.Normalize,
-                          crop_scale_min: float = 0.08) -> transforms.Compose:
+                          crop_scale_min: float = 0.08,
+                          crop_size: int = 176) -> transforms.Compose:
     # TrivialAugment/RandAugment operate on the PIL image, so they slot in
     # after the geometric transforms and before ToTensor -- not appended, or
     # they'd run on an already-normalized tensor.
     pipeline: list[object] = [
-        transforms.RandomResizedCrop(176, scale=(crop_scale_min, 1.0)),
+        transforms.RandomResizedCrop(crop_size, scale=(crop_scale_min, 1.0)),
         transforms.RandomHorizontalFlip(),
     ]
     if augment == 'trivial':
@@ -505,16 +522,17 @@ def main_worker(gpu, ngpus_per_node, args):
     train_dataset = FoodX251Dataset(
         train_dir,
         train_labels,
-        build_train_transform(args.augment, normalize, args.crop_scale_min)
+        build_train_transform(args.augment, normalize, args.crop_scale_min, args.crop_size)
     )
 
+    val_resize, val_crop = eval_resolution(args.crop_size)
     val_subset = load_val_split(args.val_split, args.val_subset)
     val_dataset = FoodX251Dataset(
         val_dir,
         val_labels,
         transforms.Compose([
-            transforms.Resize(256),
-            transforms.CenterCrop(224),
+            transforms.Resize(val_resize),
+            transforms.CenterCrop(val_crop),
             transforms.ToTensor(),
             normalize,
         ]),

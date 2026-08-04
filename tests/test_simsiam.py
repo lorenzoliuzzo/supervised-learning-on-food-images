@@ -11,8 +11,12 @@ from simsiam import (
     ProjectionMLP,
     SimSiamModel,
     TwoCropsTransform,
+    UnlabeledImageDataset,
     build_ssl_transform,
+    collapse_metrics,
+    knn_accuracy,
     negative_cosine_similarity,
+    pretrain_dirs,
     simsiam_loss,
 )
 
@@ -97,6 +101,96 @@ def test_two_crops_transform_produces_two_different_views() -> None:
     assert view1.shape == (3, 176, 176)
     assert view2.shape == (3, 176, 176)
     assert not torch.equal(view1, view2)
+
+
+def _write_jpgs(directory, count: int, prefix: str) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    for i in range(count):
+        array = np.random.randint(0, 256, (32, 32, 3), dtype=np.uint8)
+        Image.fromarray(array, mode='RGB').save(directory / f'{prefix}_{i:03d}.jpg')
+
+
+def test_unlabeled_dataset_pools_images_from_every_directory(tmp_path) -> None:
+    _write_jpgs(tmp_path / 'train_set', 3, 'train')
+    _write_jpgs(tmp_path / 'test_set', 2, 'test')
+
+    dataset = UnlabeledImageDataset([tmp_path / 'train_set', tmp_path / 'test_set'])
+
+    assert len(dataset) == 5
+
+
+def test_unlabeled_dataset_returns_views_without_a_label(tmp_path) -> None:
+    _write_jpgs(tmp_path / 'train_set', 1, 'train')
+    normalize = Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+
+    dataset = UnlabeledImageDataset(
+        [tmp_path / 'train_set'], TwoCropsTransform(build_ssl_transform(normalize)))
+    view1, view2 = dataset[0]
+
+    assert view1.shape == (3, 176, 176)
+    assert view2.shape == (3, 176, 176)
+
+
+def test_unlabeled_dataset_rejects_an_empty_pool(tmp_path) -> None:
+    (tmp_path / 'train_set').mkdir()
+    with pytest.raises(FileNotFoundError):
+        UnlabeledImageDataset([tmp_path / 'train_set'])
+
+
+def test_pretrain_dirs_adds_the_unlabeled_test_set(tmp_path) -> None:
+    (tmp_path / 'train_set').mkdir()
+    (tmp_path / 'test_set').mkdir()
+
+    assert pretrain_dirs(tmp_path, 'train') == [tmp_path / 'train_set']
+    assert pretrain_dirs(tmp_path, 'train+test') == [
+        tmp_path / 'train_set', tmp_path / 'test_set']
+
+
+def test_pretrain_dirs_explains_how_to_extract_a_missing_test_set(tmp_path) -> None:
+    (tmp_path / 'train_set').mkdir()
+    with pytest.raises(FileNotFoundError, match='unzip'):
+        pretrain_dirs(tmp_path, 'train+test')
+
+
+def test_collapse_metrics_separate_a_collapsed_representation_from_a_spread_one() -> None:
+    torch.manual_seed(0)
+    # A collapsed encoder maps every image to the same vector; a healthy one
+    # spreads them over the sphere. The gate exists to tell these apart, so
+    # both numbers must move in the right direction between the two.
+    collapsed = torch.nn.functional.normalize(torch.ones(64, 512) + 1e-6, dim=1)
+    spread = torch.nn.functional.normalize(torch.randn(64, 512), dim=1)
+
+    collapsed_std, collapsed_rank = collapse_metrics(collapsed)
+    spread_std, spread_rank = collapse_metrics(spread)
+
+    assert collapsed_std < 1e-3
+    assert spread_std > collapsed_std
+    assert collapsed_rank < spread_rank
+
+
+def test_knn_accuracy_is_perfect_when_queries_match_their_own_class(tmp_path) -> None:
+    # Two well-separated clusters, one per class, with queries sitting on top
+    # of the bank vectors -- anything but 100% here means the voting is wrong.
+    bank = torch.tensor([[1.0, 0.0], [0.99, 0.01], [0.0, 1.0], [0.01, 0.99]])
+    bank = torch.nn.functional.normalize(bank, dim=1)
+    bank_labels = torch.tensor([0, 0, 1, 1])
+
+    accuracy = knn_accuracy(
+        bank, bank_labels, bank.clone(), bank_labels.clone(),
+        k=2, temperature=0.07, num_classes=2)
+
+    assert accuracy == pytest.approx(100.0)
+
+
+def test_knn_accuracy_is_zero_when_every_label_is_wrong() -> None:
+    bank = torch.nn.functional.normalize(torch.tensor([[1.0, 0.0], [0.0, 1.0]]), dim=1)
+    bank_labels = torch.tensor([0, 1])
+
+    accuracy = knn_accuracy(
+        bank, bank_labels, bank.clone(), torch.tensor([1, 0]),
+        k=1, temperature=0.07, num_classes=2)
+
+    assert accuracy == pytest.approx(0.0)
 
 
 def test_load_encoder_weights_transfers_encoder_but_not_classifier(tmp_path) -> None:

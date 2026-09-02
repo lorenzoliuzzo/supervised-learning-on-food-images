@@ -14,6 +14,8 @@ from main import (
     SimilaritySmoothedCrossEntropyLoss,
     build_similarity_matrix,
     build_train_transform,
+    checkpoint_weights,
+    load_checkpoint_weights,
     select_amp_dtype,
     warmup_cosine_lr,
 )
@@ -253,6 +255,102 @@ def test_cutmix_replaces_hard_targets_with_a_soft_label_over_the_batch() -> None
 
     assert mixed_target.shape == (4, 251)
     assert torch.allclose(mixed_target.sum(dim=1), torch.ones(4), atol=1e-5)
+
+
+def _ema_pair(decay: float = 0.9) -> tuple[nn.Module, torch.optim.swa_utils.AveragedModel]:
+    torch.manual_seed(0)
+    model = nn.Linear(4, 4, bias=False)
+    ema_model = torch.optim.swa_utils.AveragedModel(
+        model, multi_avg_fn=torch.optim.swa_utils.get_ema_multi_avg_fn(decay)
+    )
+    # Two updates with a weight change in between, so the raw and smoothed
+    # weights genuinely differ and a mix-up between them is detectable.
+    ema_model.update_parameters(model)
+    with torch.no_grad():
+        model.weight.add_(1.0)
+    ema_model.update_parameters(model)
+    return model, ema_model
+
+
+def test_checkpoint_state_dict_holds_the_smoothed_weights_that_ship() -> None:
+    # --evaluate, analyze_errors.py and significance_test.py all read
+    # 'state_dict' and expect the weights that were actually validated.
+    model, ema_model = _ema_pair()
+
+    payload = checkpoint_weights(model, ema_model)
+
+    assert torch.allclose(payload['state_dict']['weight'], ema_model.module.weight)
+    assert torch.allclose(payload['raw_state_dict']['weight'], model.weight)
+    assert not torch.allclose(payload['state_dict']['weight'], model.weight)
+
+
+def test_checkpoint_without_ema_writes_only_the_raw_weights() -> None:
+    model = nn.Linear(4, 4, bias=False)
+
+    payload = checkpoint_weights(model, None)
+
+    assert set(payload) == {'state_dict'}
+    assert torch.allclose(payload['state_dict']['weight'], model.weight)
+
+
+def test_ema_resume_restores_the_raw_trajectory_not_its_own_average() -> None:
+    # The bug: --resume loaded the smoothed weights into `model` and paired
+    # them with the raw run's optimizer momentum, so a resumed run continued
+    # from its own moving average.
+    model, ema_model = _ema_pair()
+    payload = checkpoint_weights(model, ema_model)
+    raw_before, ema_before = model.weight.clone(), ema_model.module.weight.clone()
+
+    fresh_model = nn.Linear(4, 4, bias=False)
+    fresh_ema = torch.optim.swa_utils.AveragedModel(
+        fresh_model, multi_avg_fn=torch.optim.swa_utils.get_ema_multi_avg_fn(0.9))
+    load_checkpoint_weights(payload, fresh_model, fresh_ema)
+
+    assert torch.allclose(fresh_model.weight, raw_before)
+    assert torch.allclose(fresh_ema.module.weight, ema_before)
+
+
+def test_ema_resume_restores_n_averaged_so_the_average_is_not_re_seeded() -> None:
+    # AveragedModel seeds rather than blends while n_averaged == 0. Losing the
+    # counter would make the first post-resume update discard the whole
+    # average and jump to the raw weights.
+    model, ema_model = _ema_pair()
+    payload = checkpoint_weights(model, ema_model)
+
+    fresh_model = nn.Linear(4, 4, bias=False)
+    fresh_ema = torch.optim.swa_utils.AveragedModel(
+        fresh_model, multi_avg_fn=torch.optim.swa_utils.get_ema_multi_avg_fn(0.9))
+    load_checkpoint_weights(payload, fresh_model, fresh_ema)
+
+    assert int(fresh_ema.n_averaged) == int(ema_model.n_averaged) == 2
+
+    # One more step must blend, not seed: the EMA stays nearer where it was
+    # than the raw weights it is being pulled toward.
+    with torch.no_grad():
+        fresh_model.weight.add_(1.0)
+    before = fresh_ema.module.weight.clone()
+    fresh_ema.update_parameters(fresh_model)
+
+    assert not torch.allclose(fresh_ema.module.weight, fresh_model.weight)
+    assert ((fresh_ema.module.weight - before).abs().mean()
+            < (fresh_ema.module.weight - fresh_model.weight).abs().mean())
+
+
+def test_resuming_an_ema_run_from_a_non_ema_checkpoint_warns_and_seeds() -> None:
+    # No 'raw_state_dict' means 'state_dict' is the raw trajectory and there
+    # is no average to continue -- adding --ema to an in-flight run.
+    model = nn.Linear(4, 4, bias=False)
+    payload = checkpoint_weights(model, None)
+
+    fresh_model = nn.Linear(4, 4, bias=False)
+    fresh_ema = torch.optim.swa_utils.AveragedModel(
+        fresh_model, multi_avg_fn=torch.optim.swa_utils.get_ema_multi_avg_fn(0.9))
+
+    with pytest.warns(UserWarning, match='no EMA state'):
+        load_checkpoint_weights(payload, fresh_model, fresh_ema)
+
+    assert torch.allclose(fresh_model.weight, model.weight)
+    assert int(fresh_ema.n_averaged) == 0
 
 
 def test_ema_model_moves_toward_new_weights_without_jumping_there() -> None:

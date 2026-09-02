@@ -513,7 +513,7 @@ def main_worker(gpu, ngpus_per_node, args):
             # adapted from -- validate() returns float(top1.avg) -- so there is
             # no device to move it to.
             best_acc1 = checkpoint['best_acc1']
-            model.load_state_dict(checkpoint['state_dict'])
+            load_checkpoint_weights(checkpoint, model, ema_model)
             optimizer.load_state_dict(checkpoint['optimizer'])
             scheduler.load_state_dict(checkpoint['scheduler'])
             print("=> loaded checkpoint '{}' (epoch {})"
@@ -594,13 +594,9 @@ def main_worker(gpu, ngpus_per_node, args):
 
         if not args.multiprocessing_distributed or (args.multiprocessing_distributed
                 and args.rank % ngpus_per_node == 0):
-            # ema_model.state_dict() would carry a `module.` prefix and an
-            # `n_averaged` buffer neither FoodCNN nor --resume expects;
-            # `.module` unwraps AveragedModel back to a plain state dict.
-            save_state = ema_model.module.state_dict() if ema_model is not None else model.state_dict()
             save_checkpoint({
                 'epoch': epoch + 1,
-                'state_dict': save_state,
+                **checkpoint_weights(model, ema_model),
                 'best_acc1': best_acc1,
                 'optimizer' : optimizer.state_dict(),
                 'scheduler' : scheduler.state_dict()
@@ -779,6 +775,50 @@ def load_encoder_weights(model: nn.Module, checkpoint_path: str) -> None:
     missing, unexpected = model.load_state_dict(encoder_state, strict=False)
     print(f"=> loaded encoder weights from '{checkpoint_path}' "
           f"({len(encoder_state)} tensors; missing={len(missing)}, unexpected={len(unexpected)})")
+
+
+def checkpoint_weights(model: nn.Module, ema_model: nn.Module | None) -> dict[str, object]:
+    # 'state_dict' always means "the weights that were validated and that
+    # ship" -- the smoothed copy on an --ema run. That is what --evaluate,
+    # analyze_errors.py and significance_test.py all read, and changing its
+    # meaning would silently re-point them at un-smoothed weights.
+    #
+    # It is not what --resume needs. Continuing from the average would replace
+    # the raw trajectory with its own moving average while keeping the raw
+    # run's optimizer momentum, so the extra keys carry the trajectory back.
+    # ema_n_averaged matters because AveragedModel seeds rather than blends on
+    # its first update: without it a resumed run re-seeds the EMA mid-training
+    # and throws away everything it had averaged so far.
+    if ema_model is None:
+        return {'state_dict': model.state_dict()}
+    return {
+        'state_dict': ema_model.module.state_dict(),
+        'raw_state_dict': model.state_dict(),
+        'ema_n_averaged': int(ema_model.n_averaged),
+    }
+
+
+def load_checkpoint_weights(checkpoint: dict, model: nn.Module, ema_model: nn.Module | None) -> None:
+    # Mirror of checkpoint_weights. A checkpoint written before --ema existed,
+    # or by a run without it, has no 'raw_state_dict' -- then 'state_dict' is
+    # the raw trajectory and there is no average to restore.
+    resumed_ema = 'raw_state_dict' in checkpoint
+    model.load_state_dict(checkpoint['raw_state_dict' if resumed_ema else 'state_dict'])
+
+    if ema_model is None:
+        return
+    if resumed_ema:
+        ema_model.module.load_state_dict(checkpoint['state_dict'])
+        ema_model.n_averaged.fill_(checkpoint['ema_n_averaged'])
+    else:
+        # Starting an EMA from a checkpoint that never kept one. Seeding it at
+        # the loaded weights with n_averaged=0 is the honest state: there is no
+        # history to continue, and the first update_parameters() will seed
+        # again from the same place.
+        warnings.warn("checkpoint has no EMA state; starting the average from the "
+                      "loaded weights rather than continuing one")
+        ema_model.module.load_state_dict(model.state_dict())
+        ema_model.n_averaged.zero_()
 
 
 def save_checkpoint(state, is_best, filename):

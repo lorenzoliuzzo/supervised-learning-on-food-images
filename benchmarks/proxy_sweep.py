@@ -27,6 +27,7 @@ from trunk_variants import BY_KEY, Variant  # noqa: E402
 
 from main import (  # noqa: E402
     FoodX251Dataset,
+    build_train_transform,
     dataset_paths,
     load_val_split,
     select_amp_dtype,
@@ -89,17 +90,29 @@ def run_proxy(
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer, lr_lambda=lambda epoch: warmup_cosine_lr(epoch, epochs))
 
+    # Every default from main.py's own parser, then the few fields a proxy run
+    # differs on. Hand-listing the fields train()/validate() happen to read is
+    # what broke this sweep silently once already: Phase D added --mix, train()
+    # started reading args.mix, and nothing here knew until it crashed a leg in.
+    args = main_parser.parse_args([])
+    args.distributed = False
+    args.multiprocessing_distributed = False
+    args.gpu = None
+    args.batch_size = batch_size
+    args.workers = workers
+
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     (train_dir, train_labels), (val_dir, val_labels) = dataset_paths(data_root)
 
+    # Via build_train_transform rather than an inlined Compose, for the same
+    # reason args comes from main.py's parser: a hand-rolled copy tracks the
+    # real recipe only until someone changes one of them. --augment and
+    # --crop-scale-min (#35) are already two ways for it to drift, and this
+    # copy would drift *silently* -- a leg trained under a different
+    # augmentation policy still reports a plausible number.
     train_dataset = FoodX251Dataset(
         train_dir, train_labels,
-        transforms.Compose([
-            transforms.RandomResizedCrop(176),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            normalize,
-        ]))
+        build_train_transform(args.augment, normalize, args.crop_scale_min))
     val_dataset = FoodX251Dataset(
         val_dir, val_labels,
         transforms.Compose([
@@ -116,17 +129,6 @@ def run_proxy(
     val_loader = torch.utils.data.DataLoader(
         val_dataset, batch_size=batch_size, shuffle=False,
         num_workers=workers, pin_memory=True, persistent_workers=True)
-
-    # Every default from main.py's own parser, then the few fields a proxy run
-    # differs on. Hand-listing the fields train()/validate() happen to read is
-    # what broke this sweep silently once already: Phase D added --mix, train()
-    # started reading args.mix, and nothing here knew until it crashed a leg in.
-    args = main_parser.parse_args([])
-    args.distributed = False
-    args.multiprocessing_distributed = False
-    args.gpu = None
-    args.batch_size = batch_size
-    args.workers = workers
 
     params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     run = RunLog(label=variant.key, config={

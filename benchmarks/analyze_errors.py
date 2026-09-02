@@ -36,13 +36,17 @@ NUM_CLASSES = 251
 ANALYSIS_ROOT = Path("runs/analysis")
 
 
-def default_out_dir(checkpoint: Path) -> Path:
-    # One directory per checkpoint, so analyzing a second checkpoint can't
-    # silently overwrite the first one's results. Suffixes are stripped
-    # explicitly rather than with Path.stem/suffix: ".pth.tar" is two suffixes,
-    # and run labels contain dots (phaseD-lr0.8), which stem would eat too.
+def default_out_dir(checkpoint: Path, split: str) -> Path:
+    # One directory per checkpoint *and split*. Keying on the checkpoint alone
+    # meant `--split train` silently overwrote the `--split dev` run's
+    # confusion matrix and possible_duplicate_classes.csv -- and those two mean
+    # different things, since the similarity prior --loss sim reads is only
+    # legitimate when built from train-only evidence (see src/main.py:311).
+    # Suffixes are stripped explicitly rather than with Path.stem/suffix:
+    # ".pth.tar" is two suffixes, and run labels contain dots (phaseD-lr0.8),
+    # which stem would eat too.
     name = checkpoint.name.removesuffix(".tar").removesuffix(".pth")
-    return ANALYSIS_ROOT / name.removesuffix("-best")
+    return ANALYSIS_ROOT / f"{name.removesuffix('-best')}-{split}"
 
 
 def top_confused_pairs(
@@ -204,14 +208,14 @@ def main() -> None:
                               "training job without contending for it")
     parser.add_argument("--out", default=None, type=Path,
                          help=f"default {ANALYSIS_ROOT}/<checkpoint name without "
-                              "'-best.pth.tar'>")
+                              "'-best.pth.tar'>-<split>")
     parser.add_argument("--top-n", default=20, type=int)
     parser.add_argument("--tsne-samples", default=2000, type=int)
     parser.add_argument("--seed", default=251, type=int)
     args = parser.parse_args()
 
     device = torch.device(args.device)
-    out_dir = args.out if args.out is not None else default_out_dir(args.checkpoint)
+    out_dir = args.out if args.out is not None else default_out_dir(args.checkpoint, args.split)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     class_names = load_class_names(args.data / "meta" / "class_list.txt")

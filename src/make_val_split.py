@@ -2,8 +2,10 @@
 #
 # Writes splits/val_split.csv once. Ablations and checkpoint selection read
 # val-dev only; val-test is touched once, for the report's headline number.
-# The split must be a committed file, not recomputed per run -- a split that
-# drifts between runs is worse than no split.
+# The output is gitignored and regenerated per checkout rather than committed,
+# so the fixed --seed default is what makes the split stable -- a split that
+# drifts between runs is worse than no split. Do not change that default.
+# main.py refuses to run with --val-subset dev/test until this has been run.
 from __future__ import annotations
 
 import argparse

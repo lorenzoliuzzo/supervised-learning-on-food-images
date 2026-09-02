@@ -75,8 +75,9 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'fastest way to use PyTorch for either single node or '
                          'multi node data parallel training')
 parser.add_argument('--val-split', default='splits/val_split.csv', type=str,
-                    help='path to the committed val-dev/val-test split (default: '
-                         'splits/val_split.csv); ignored if the file does not exist')
+                    help='path to the val-dev/val-test split (default: '
+                         'splits/val_split.csv); generate it with make_val_split.py. '
+                         'Required unless --val-subset is all')
 parser.add_argument('--val-subset', default='dev', choices=['dev', 'test', 'all'],
                     help='which half of the val split to evaluate against '
                          '(default: dev). val-test is touched once, for the '
@@ -118,10 +119,18 @@ parser.add_argument('--similarity-pairs',
                     type=str,
                     help='CSV of class_a,class_b near-duplicate pairs for --loss sim, '
                          'generated with `analyze_errors.py <checkpoint> --split train` '
-                         '(see issue #27); falls back to uniform smoothing if missing')
+                         '(see issue #27), which writes it to '
+                         'runs/analysis/<checkpoint>-train/ unless --out says otherwise; '
+                         'falls back to uniform smoothing if missing')
 parser.add_argument('--similarity-partner-frac', default=0.5, type=float,
                     help='fraction of the smoothing budget given to detected partner '
                          'classes for --loss sim (default: 0.5)')
+
+
+# Train views are 176 px, validation crops are 224 -- the train-test resolution
+# discrepancy from torchvision's recipe (see the val transform in main_worker).
+# Anything reporting on the *training* pass has to use this one.
+TRAIN_CROP = 176
 
 
 class FoodX251Dataset(torch.utils.data.Dataset):
@@ -171,7 +180,7 @@ def build_train_transform(augment: str, normalize: transforms.Normalize,
     # after the geometric transforms and before ToTensor -- not appended, or
     # they'd run on an already-normalized tensor.
     pipeline: list[object] = [
-        transforms.RandomResizedCrop(176, scale=(crop_scale_min, 1.0)),
+        transforms.RandomResizedCrop(TRAIN_CROP, scale=(crop_scale_min, 1.0)),
         transforms.RandomHorizontalFlip(),
     ]
     if augment == 'trivial':
@@ -191,14 +200,20 @@ def load_class_names(path: str | pathlib.Path, num_classes: int = 251) -> list[s
 
 
 def load_val_split(split_path: str | pathlib.Path, name: str) -> set[str] | None:
-    # Returns None for 'all' or a missing split file so callers can fall back
-    # to the unfiltered val set without a special case at every call site.
+    # None means "no filtering", which only 'all' may ask for. A missing file
+    # used to fall back to that too, which silently evaluated against the whole
+    # val set -- val-test included -- and defeated the point of asking for
+    # val-dev. The split is gitignored and regenerated per checkout, so absent
+    # is the expected first-run state and has to be loud.
     if name == 'all':
         return None
     path = pathlib.Path(split_path)
     if not path.exists():
-        warnings.warn(f"val split file not found at '{path}', evaluating against the full val set")
-        return None
+        raise FileNotFoundError(
+            f"val split file not found at '{path}', so --val-subset {name} cannot be honored. "
+            "Generate it with `python src/make_val_split.py` (it is gitignored and "
+            "reproducible from a fixed seed), or pass --val-subset all to evaluate "
+            "against the full val set on purpose.")
     df = pd.read_csv(path)
     return set(df.loc[df['split'] == name, 'img_name'])
 
@@ -246,9 +261,10 @@ class GeneralizedCrossEntropyLoss(nn.Module):
 
 
 def load_similarity_pairs(path: str | pathlib.Path, class_names: list[str]) -> list[tuple[int, int]]:
-    # Mirrors load_val_split's missing-file fallback: an empty pair list makes
-    # build_similarity_matrix produce ordinary uniform smoothing, so callers
-    # don't need a special case for "the file hasn't been generated yet".
+    # Unlike load_val_split, a missing file here is recoverable rather than
+    # fatal: an empty pair list makes build_similarity_matrix produce ordinary
+    # uniform smoothing, so the run degrades to --loss ce's target distribution
+    # instead of scoring against the wrong images.
     path = pathlib.Path(path)
     if not path.exists():
         warnings.warn(f"similarity pairs file not found at '{path}', "
@@ -292,9 +308,14 @@ def build_similarity_matrix(
         p = partners[y]
         others = [k for k in range(num_classes) if k != y and k not in p]
         if p:
-            matrix[y, list(p)] = (partner_frac * others_total) / len(p)
-            matrix[y, others] = ((1 - partner_frac) * others_total) / len(others)
-        else:
+            # With no non-partner classes left, the partners absorb the whole
+            # budget rather than the split being divided by zero. Only
+            # reachable from a pairs CSV that partners y with everything.
+            partner_share = others_total if not others else partner_frac * others_total
+            matrix[y, list(p)] = partner_share / len(p)
+            if others:
+                matrix[y, others] = ((1 - partner_frac) * others_total) / len(others)
+        elif others:
             matrix[y, others] = others_total / len(others)
         matrix[y, y] = (1 - smoothing) + y_bonus
     return matrix
@@ -312,7 +333,14 @@ class SimilaritySmoothedCrossEntropyLoss(nn.Module):
         self.register_buffer('smoothing_matrix', smoothing_matrix)
 
     def forward(self, output: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        soft_targets = self.smoothing_matrix[target]
+        # Mixup/CutMix hand down a soft (N, K) target instead of hard indices.
+        # The hard case is that same lookup written as a one-hot matmul --
+        # e_y @ M is row y of M -- so a mixed target smooths to the matching
+        # blend of rows rather than crashing on the index lookup.
+        soft_targets = (
+            self.smoothing_matrix[target] if target.ndim == 1
+            else target.to(self.smoothing_matrix.dtype) @ self.smoothing_matrix
+        )
         log_probs = torch.log_softmax(output, dim=1)
         return -(soft_targets * log_probs).sum(dim=1).mean()
 
@@ -326,6 +354,25 @@ def main():
         parser.error('--init-encoder and --resume are mutually exclusive: '
                      '--init-encoder starts a new run from pretrained weights, '
                      '--resume continues an existing one')
+
+    # ce and sim both take the soft (N, K) target Mixup/CutMix produce. GCE's
+    # L_q = (1 - p_y^q)/q is defined against a single true class and has no
+    # settled soft-target form, so this is refused rather than guessed at.
+    if args.mix != 'none' and args.loss == 'gce':
+        parser.error(f'--mix {args.mix} and --loss gce are incompatible: Mixup/CutMix '
+                     'replace the hard label with a distribution over classes, which '
+                     'GCE has no defined form for. Use --loss ce or --loss sim.')
+
+    # main_worker only wires up DistributedDataParallel under CUDA. Without
+    # this, --multiprocessing-distributed --no-accel initialises a process
+    # group and then trains N unsynchronised CPU models that never exchange a
+    # gradient -- which looks like it is working. This project runs single-GPU
+    # anyway (see the DataParallel note in main_worker).
+    # args.distributed is not derived until below, so test the flags it comes from.
+    if (args.world_size > 1 or args.multiprocessing_distributed) and args.no_accel:
+        parser.error('distributed training requires an accelerator: '
+                     '--no-accel would leave every rank on CPU and unwrapped, '
+                     'training N independent models that never sync gradients')
 
     if args.seed is not None:
         random.seed(args.seed)
@@ -436,7 +483,13 @@ def main_worker(gpu, ngpus_per_node, args):
         model = model.to(memory_format=torch.channels_last)
         torch.cuda.reset_peak_memory_stats()
 
-    summary(model, input_size=(3, 224, 224))
+    # torchsummary only knows 'cuda' and 'cpu' and builds its probe tensor
+    # accordingly, so on any other accelerator (mps, xpu) the model and the
+    # probe would sit on different devices. At TRAIN_CROP, not 224: the
+    # per-layer activation shapes it prints are only true for the size that
+    # actually runs.
+    if device.type in ('cuda', 'cpu'):
+        summary(model, input_size=(3, TRAIN_CROP, TRAIN_CROP), device=device.type)
 
     amp_dtype = select_amp_dtype(device)
     scaler = torch.amp.GradScaler('cuda', enabled=device.type == 'cuda' and amp_dtype is torch.float16)
@@ -474,6 +527,7 @@ def main_worker(gpu, ngpus_per_node, args):
     ) if args.ema else None
     
     # optionally resume from a checkpoint
+    resumed_checkpoint = None
     if args.resume:
         if os.path.isfile(args.resume):
             print(f"=> loading checkpoint '{args.resume}'")
@@ -484,15 +538,22 @@ def main_worker(gpu, ngpus_per_node, args):
                 loc = f'{device.type}:{args.gpu}'
                 checkpoint = torch.load(args.resume, map_location=loc)
             args.start_epoch = checkpoint['epoch']
+            # A plain float, not a tensor as in the reference script this was
+            # adapted from -- validate() returns float(top1.avg) -- so there is
+            # no device to move it to.
             best_acc1 = checkpoint['best_acc1']
-            if args.gpu is not None:
-                # best_acc1 may be from a checkpoint from a different GPU
-                best_acc1 = best_acc1.to(args.gpu)
-            model.load_state_dict(checkpoint['state_dict'])
+            load_checkpoint_weights(checkpoint, model, ema_model)
             optimizer.load_state_dict(checkpoint['optimizer'])
             scheduler.load_state_dict(checkpoint['scheduler'])
+            resumed_checkpoint = checkpoint
             print("=> loaded checkpoint '{}' (epoch {})"
                   .format(args.resume, checkpoint['epoch']))
+        elif args.evaluate:
+            # Continuing here would report the accuracy of an untrained model
+            # as if it were a result. A typo'd path must not look like a number.
+            raise SystemExit(
+                f"=> no checkpoint found at '{args.resume}', so there is nothing to "
+                "evaluate -- --evaluate on randomly initialized weights is not a result")
         else:
             print(f"=> no checkpoint found at '{args.resume}'")
 
@@ -540,7 +601,10 @@ def main_worker(gpu, ngpus_per_node, args):
         validate(val_loader, model, criterion, args, amp_dtype)
         return
 
-    run = RunLog(label=args.run_label, config=vars(args) | {'val_subset_size': len(val_dataset)})
+    run_config = vars(args) | {'val_subset_size': len(val_dataset)}
+    run = (RunLog.restore(args.run_label, run_config, resumed_checkpoint)
+           if resumed_checkpoint is not None
+           else RunLog(label=args.run_label, config=run_config))
 
     # The EMA weights are what gets evaluated and checkpointed once enabled --
     # the whole point of EMA is that the smoothed weights are the ones worth
@@ -569,16 +633,13 @@ def main_worker(gpu, ngpus_per_node, args):
 
         if not args.multiprocessing_distributed or (args.multiprocessing_distributed
                 and args.rank % ngpus_per_node == 0):
-            # ema_model.state_dict() would carry a `module.` prefix and an
-            # `n_averaged` buffer neither FoodCNN nor --resume expects;
-            # `.module` unwraps AveragedModel back to a plain state dict.
-            save_state = ema_model.module.state_dict() if ema_model is not None else model.state_dict()
             save_checkpoint({
                 'epoch': epoch + 1,
-                'state_dict': save_state,
+                **checkpoint_weights(model, ema_model),
                 'best_acc1': best_acc1,
                 'optimizer' : optimizer.state_dict(),
-                'scheduler' : scheduler.state_dict()
+                'scheduler' : scheduler.state_dict(),
+                **run.to_checkpoint(),
             }, is_best, filename=f'checkpoints/{args.run_label}.pth.tar')
 
     peak_vram_gib = torch.cuda.max_memory_allocated() / 2**30 if device.type == 'cuda' else 0.0
@@ -754,6 +815,50 @@ def load_encoder_weights(model: nn.Module, checkpoint_path: str) -> None:
     missing, unexpected = model.load_state_dict(encoder_state, strict=False)
     print(f"=> loaded encoder weights from '{checkpoint_path}' "
           f"({len(encoder_state)} tensors; missing={len(missing)}, unexpected={len(unexpected)})")
+
+
+def checkpoint_weights(model: nn.Module, ema_model: nn.Module | None) -> dict[str, object]:
+    # 'state_dict' always means "the weights that were validated and that
+    # ship" -- the smoothed copy on an --ema run. That is what --evaluate,
+    # analyze_errors.py and significance_test.py all read, and changing its
+    # meaning would silently re-point them at un-smoothed weights.
+    #
+    # It is not what --resume needs. Continuing from the average would replace
+    # the raw trajectory with its own moving average while keeping the raw
+    # run's optimizer momentum, so the extra keys carry the trajectory back.
+    # ema_n_averaged matters because AveragedModel seeds rather than blends on
+    # its first update: without it a resumed run re-seeds the EMA mid-training
+    # and throws away everything it had averaged so far.
+    if ema_model is None:
+        return {'state_dict': model.state_dict()}
+    return {
+        'state_dict': ema_model.module.state_dict(),
+        'raw_state_dict': model.state_dict(),
+        'ema_n_averaged': int(ema_model.n_averaged),
+    }
+
+
+def load_checkpoint_weights(checkpoint: dict, model: nn.Module, ema_model: nn.Module | None) -> None:
+    # Mirror of checkpoint_weights. A checkpoint written before --ema existed,
+    # or by a run without it, has no 'raw_state_dict' -- then 'state_dict' is
+    # the raw trajectory and there is no average to restore.
+    resumed_ema = 'raw_state_dict' in checkpoint
+    model.load_state_dict(checkpoint['raw_state_dict' if resumed_ema else 'state_dict'])
+
+    if ema_model is None:
+        return
+    if resumed_ema:
+        ema_model.module.load_state_dict(checkpoint['state_dict'])
+        ema_model.n_averaged.fill_(checkpoint['ema_n_averaged'])
+    else:
+        # Starting an EMA from a checkpoint that never kept one. Seeding it at
+        # the loaded weights with n_averaged=0 is the honest state: there is no
+        # history to continue, and the first update_parameters() will seed
+        # again from the same place.
+        warnings.warn("checkpoint has no EMA state; starting the average from the "
+                      "loaded weights rather than continuing one")
+        ema_model.module.load_state_dict(model.state_dict())
+        ema_model.n_averaged.zero_()
 
 
 def save_checkpoint(state, is_best, filename):

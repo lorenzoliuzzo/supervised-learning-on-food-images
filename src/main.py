@@ -119,7 +119,9 @@ parser.add_argument('--similarity-pairs',
                     type=str,
                     help='CSV of class_a,class_b near-duplicate pairs for --loss sim, '
                          'generated with `analyze_errors.py <checkpoint> --split train` '
-                         '(see issue #27); falls back to uniform smoothing if missing')
+                         '(see issue #27), which writes it to '
+                         'runs/analysis/<checkpoint>-train/ unless --out says otherwise; '
+                         'falls back to uniform smoothing if missing')
 parser.add_argument('--similarity-partner-frac', default=0.5, type=float,
                     help='fraction of the smoothing budget given to detected partner '
                          'classes for --loss sim (default: 0.5)')

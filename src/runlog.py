@@ -34,7 +34,36 @@ class RunLog:
     label: str
     config: dict[str, Any]
     history: list[EpochRecord] = field(default_factory=list)
+    # Seconds already spent by the run this one continues, so wall_clock_s
+    # covers the whole run rather than just the tail since the last restart.
+    resumed_wall_clock_s: float = 0.0
     _started: float = field(default_factory=time.perf_counter, repr=False)
+
+    @classmethod
+    def restore(cls, label: str, config: dict[str, Any], checkpoint: dict[str, Any]) -> RunLog:
+        # A resumed run used to start its log from empty, so runs/*.json held
+        # only the epochs after the restart and plot_runs.py drew a curve
+        # beginning mid-training with nothing to say it was truncated.
+        # Checkpoints written before this carry neither key and restore as a
+        # fresh log, which is the old behaviour.
+        return cls(
+            label=label,
+            config=config,
+            history=[EpochRecord(**record) for record in checkpoint.get('run_history', [])],
+            resumed_wall_clock_s=checkpoint.get('run_wall_clock_s', 0.0),
+        )
+
+    def to_checkpoint(self) -> dict[str, Any]:
+        # Carried inside the checkpoint rather than re-read from runs/*.json:
+        # the log is only written at the end of a run, so a run that died
+        # mid-training -- the reason to resume at all -- never wrote one.
+        return {
+            'run_history': [vars(r) for r in self.history],
+            'run_wall_clock_s': self.elapsed(),
+        }
+
+    def elapsed(self) -> float:
+        return self.resumed_wall_clock_s + (time.perf_counter() - self._started)
 
     def config_hash(self) -> str:
         # Config, not label, is what should collide when two runs are the
@@ -81,7 +110,7 @@ class RunLog:
             "label": self.label,
             "config": self.config,
             "config_hash": self.config_hash(),
-            "wall_clock_s": time.perf_counter() - self._started,
+            "wall_clock_s": self.elapsed(),
             "peak_vram_gib": peak_vram_gib,
             "history": [vars(r) for r in self.history],
         }

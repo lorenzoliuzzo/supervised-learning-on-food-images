@@ -1,6 +1,7 @@
 import pathlib
 
 import pandas as pd
+import pytest
 import torch
 from PIL import Image
 from torchvision.transforms import Normalize
@@ -159,8 +160,18 @@ def test_load_val_split_all_returns_none() -> None:
     assert load_val_split('splits/val_split.csv', 'all') is None
 
 
-def test_load_val_split_missing_file_falls_back_to_none(tmp_path: pathlib.Path) -> None:
-    assert load_val_split(tmp_path / 'does_not_exist.csv', 'dev') is None
+@pytest.mark.parametrize('subset', ['dev', 'test'])
+def test_load_val_split_missing_file_is_fatal(tmp_path: pathlib.Path, subset: str) -> None:
+    # Falling back to the unfiltered val set here would evaluate val-dev runs
+    # against val-test images, contaminating both model selection and the
+    # report's headline number -- with nothing but a warning to say so.
+    with pytest.raises(FileNotFoundError, match='make_val_split'):
+        load_val_split(tmp_path / 'does_not_exist.csv', subset)
+
+
+def test_load_val_split_all_tolerates_a_missing_file(tmp_path: pathlib.Path) -> None:
+    # 'all' asks for no filtering, so it never needed the file to begin with.
+    assert load_val_split(tmp_path / 'does_not_exist.csv', 'all') is None
 
 
 def test_load_class_names_parses_index_and_replaces_underscores(tmp_path: pathlib.Path) -> None:

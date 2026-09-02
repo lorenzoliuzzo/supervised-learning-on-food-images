@@ -328,6 +328,7 @@ def main() -> None:
         weight_decay=args.weight_decay, nesterov=True)
     scheduler = LambdaLR(optimizer, lr_lambda=lambda epoch: cosine_lr(epoch, args.epochs))
 
+    resumed_checkpoint = None
     if args.resume:
         checkpoint_path = pathlib.Path(args.resume)
         if checkpoint_path.is_file():
@@ -337,6 +338,7 @@ def main() -> None:
             model.load_state_dict(checkpoint['state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer'])
             scheduler.load_state_dict(checkpoint['scheduler'])
+            resumed_checkpoint = checkpoint
             print(f"=> loaded checkpoint '{checkpoint_path}' (epoch {checkpoint['epoch']})")
         else:
             print(f"=> no checkpoint found at '{checkpoint_path}'")
@@ -391,7 +393,11 @@ def main() -> None:
             batch_size=args.batch_size, shuffle=False, num_workers=probe_workers, pin_memory=False)
         probe_loaders = (bank_loader, query_loader)
 
-    run = RunLog(label=args.run_label, config=vars(args))
+    # A 200-epoch pretraining run is the one most likely to be resumed, so
+    # losing the pre-restart history here would hurt most.
+    run = (RunLog.restore(args.run_label, vars(args), resumed_checkpoint)
+           if resumed_checkpoint is not None
+           else RunLog(label=args.run_label, config=vars(args)))
 
     for epoch in range(args.start_epoch, args.epochs):
         lr_used = optimizer.param_groups[0]['lr']
@@ -421,6 +427,7 @@ def main() -> None:
             'state_dict': model.state_dict(),
             'optimizer': optimizer.state_dict(),
             'scheduler': scheduler.state_dict(),
+            **run.to_checkpoint(),
         }, is_best=False, filename=f'checkpoints/{args.run_label}.pth.tar')
 
         # Written every epoch, not just at the end: a crash mid-run (the

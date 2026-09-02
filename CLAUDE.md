@@ -20,7 +20,6 @@ All source lives under `src/`; nothing but config sits at the repo root.
   purpose; don't restructure it into something else.
 - `src/resnet.py` — the unmodified PyTorch reference script, kept as a baseline
   for comparison. **Do not edit it.**
-- `src/food101.py` — Food-101 side experiments.
 - `report/` — Typst sources for the report. Don't edit unless the issue says to.
 - `plans/` — dated roadmaps, `YYYY-MM-DD-slug.md`. Update the checkboxes and the
   `Status:` line of the active plan as work lands, rather than rewriting history.

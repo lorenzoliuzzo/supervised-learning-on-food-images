@@ -124,7 +124,10 @@ than the new shortcut BNs add back). 17 tests pass, `ruff check .` clean.
       committing the output: `splits/val_split.csv` is gitignored (12k rows,
       no information not already in the dataset + one seed), regenerate with
       `python src/make_val_split.py` before the first training run on a fresh
-      checkout.
+      checkout. That last step is now enforced rather than assumed: until
+      2026-09-02 a missing split file only warned and then evaluated against
+      the *full* val set, silently mixing val-test into model selection
+      (issue #40). `--val-subset dev`/`test` now fails loudly instead.
 - [ ] **Fixed seed** and [x] **a fixed 15-epoch proxy protocol** for every
       comparison. At ~1.2 min/epoch a proxy run is ~18 minutes, so comparisons
       that would be unaffordable at 90 epochs are routine. Rank on the proxy,

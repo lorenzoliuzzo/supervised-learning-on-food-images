@@ -20,24 +20,38 @@ from model import FoodCNN
 
 
 def test_default_out_dir_strips_best_and_both_extensions() -> None:
-    assert default_out_dir(pathlib.Path("checkpoints/phaseD-gce-best.pth.tar")) == pathlib.Path(
-        "runs/analysis/phaseD-gce")
-    assert default_out_dir(pathlib.Path("checkpoints/phaseD-gce.pth.tar")) == pathlib.Path(
-        "runs/analysis/phaseD-gce")
+    assert default_out_dir(
+        pathlib.Path("checkpoints/phaseD-gce-best.pth.tar"), "dev") == pathlib.Path(
+        "runs/analysis/phaseD-gce-dev")
+    assert default_out_dir(
+        pathlib.Path("checkpoints/phaseD-gce.pth.tar"), "dev") == pathlib.Path(
+        "runs/analysis/phaseD-gce-dev")
 
 
 def test_default_out_dir_keeps_dots_inside_the_run_label() -> None:
     # Path.stem would turn "phaseD-lr0.8" into "phaseD-lr0" and collapse the
     # whole learning-rate sweep into one directory.
-    assert default_out_dir(pathlib.Path("checkpoints/phaseD-lr0.8-best.pth.tar")) == pathlib.Path(
-        "runs/analysis/phaseD-lr0.8")
+    assert default_out_dir(
+        pathlib.Path("checkpoints/phaseD-lr0.8-best.pth.tar"), "dev") == pathlib.Path(
+        "runs/analysis/phaseD-lr0.8-dev")
 
 
 def test_default_out_dir_differs_per_checkpoint() -> None:
     # The point of the default: two checkpoints analyzed back to back must not
     # write over each other.
-    assert default_out_dir(pathlib.Path("checkpoints/phaseD-gce-best.pth.tar")) != default_out_dir(
-        pathlib.Path("checkpoints/phaseD-mixup-best.pth.tar"))
+    assert default_out_dir(
+        pathlib.Path("checkpoints/phaseD-gce-best.pth.tar"), "dev") != default_out_dir(
+        pathlib.Path("checkpoints/phaseD-mixup-best.pth.tar"), "dev")
+
+
+@pytest.mark.parametrize(("split_a", "split_b"), [("dev", "train"), ("dev", "test")])
+def test_default_out_dir_differs_per_split(split_a: str, split_b: str) -> None:
+    # The same checkpoint analyzed on two splits must not collide either. The
+    # train-split run produces possible_duplicate_classes.csv, which --loss sim
+    # consumes, and a val-dev version of that file means something different.
+    checkpoint = pathlib.Path("checkpoints/phaseD-gce-best.pth.tar")
+
+    assert default_out_dir(checkpoint, split_a) != default_out_dir(checkpoint, split_b)
 
 
 def test_load_class_names_parses_index_and_replaces_underscores(tmp_path: pathlib.Path) -> None:

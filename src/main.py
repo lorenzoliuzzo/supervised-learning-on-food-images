@@ -127,6 +127,12 @@ parser.add_argument('--similarity-partner-frac', default=0.5, type=float,
                          'classes for --loss sim (default: 0.5)')
 
 
+# Train views are 176 px, validation crops are 224 -- the train-test resolution
+# discrepancy from torchvision's recipe (see the val transform in main_worker).
+# Anything reporting on the *training* pass has to use this one.
+TRAIN_CROP = 176
+
+
 class FoodX251Dataset(torch.utils.data.Dataset):
     def __init__(self, image_dir, label_file, transform=None, subset=None):
         self.image_dir = pathlib.Path(image_dir)
@@ -174,7 +180,7 @@ def build_train_transform(augment: str, normalize: transforms.Normalize,
     # after the geometric transforms and before ToTensor -- not appended, or
     # they'd run on an already-normalized tensor.
     pipeline: list[object] = [
-        transforms.RandomResizedCrop(176, scale=(crop_scale_min, 1.0)),
+        transforms.RandomResizedCrop(TRAIN_CROP, scale=(crop_scale_min, 1.0)),
         transforms.RandomHorizontalFlip(),
     ]
     if augment == 'trivial':
@@ -302,9 +308,14 @@ def build_similarity_matrix(
         p = partners[y]
         others = [k for k in range(num_classes) if k != y and k not in p]
         if p:
-            matrix[y, list(p)] = (partner_frac * others_total) / len(p)
-            matrix[y, others] = ((1 - partner_frac) * others_total) / len(others)
-        else:
+            # With no non-partner classes left, the partners absorb the whole
+            # budget rather than the split being divided by zero. Only
+            # reachable from a pairs CSV that partners y with everything.
+            partner_share = others_total if not others else partner_frac * others_total
+            matrix[y, list(p)] = partner_share / len(p)
+            if others:
+                matrix[y, others] = ((1 - partner_frac) * others_total) / len(others)
+        elif others:
             matrix[y, others] = others_total / len(others)
         matrix[y, y] = (1 - smoothing) + y_bonus
     return matrix
@@ -351,6 +362,17 @@ def main():
         parser.error(f'--mix {args.mix} and --loss gce are incompatible: Mixup/CutMix '
                      'replace the hard label with a distribution over classes, which '
                      'GCE has no defined form for. Use --loss ce or --loss sim.')
+
+    # main_worker only wires up DistributedDataParallel under CUDA. Without
+    # this, --multiprocessing-distributed --no-accel initialises a process
+    # group and then trains N unsynchronised CPU models that never exchange a
+    # gradient -- which looks like it is working. This project runs single-GPU
+    # anyway (see the DataParallel note in main_worker).
+    # args.distributed is not derived until below, so test the flags it comes from.
+    if (args.world_size > 1 or args.multiprocessing_distributed) and args.no_accel:
+        parser.error('distributed training requires an accelerator: '
+                     '--no-accel would leave every rank on CPU and unwrapped, '
+                     'training N independent models that never sync gradients')
 
     if args.seed is not None:
         random.seed(args.seed)
@@ -461,7 +483,13 @@ def main_worker(gpu, ngpus_per_node, args):
         model = model.to(memory_format=torch.channels_last)
         torch.cuda.reset_peak_memory_stats()
 
-    summary(model, input_size=(3, 224, 224))
+    # torchsummary only knows 'cuda' and 'cpu' and builds its probe tensor
+    # accordingly, so on any other accelerator (mps, xpu) the model and the
+    # probe would sit on different devices. At TRAIN_CROP, not 224: the
+    # per-layer activation shapes it prints are only true for the size that
+    # actually runs.
+    if device.type in ('cuda', 'cpu'):
+        summary(model, input_size=(3, TRAIN_CROP, TRAIN_CROP), device=device.type)
 
     amp_dtype = select_amp_dtype(device)
     scaler = torch.amp.GradScaler('cuda', enabled=device.type == 'cuda' and amp_dtype is torch.float16)
@@ -499,6 +527,7 @@ def main_worker(gpu, ngpus_per_node, args):
     ) if args.ema else None
     
     # optionally resume from a checkpoint
+    resumed_checkpoint = None
     if args.resume:
         if os.path.isfile(args.resume):
             print(f"=> loading checkpoint '{args.resume}'")
@@ -516,8 +545,15 @@ def main_worker(gpu, ngpus_per_node, args):
             load_checkpoint_weights(checkpoint, model, ema_model)
             optimizer.load_state_dict(checkpoint['optimizer'])
             scheduler.load_state_dict(checkpoint['scheduler'])
+            resumed_checkpoint = checkpoint
             print("=> loaded checkpoint '{}' (epoch {})"
                   .format(args.resume, checkpoint['epoch']))
+        elif args.evaluate:
+            # Continuing here would report the accuracy of an untrained model
+            # as if it were a result. A typo'd path must not look like a number.
+            raise SystemExit(
+                f"=> no checkpoint found at '{args.resume}', so there is nothing to "
+                "evaluate -- --evaluate on randomly initialized weights is not a result")
         else:
             print(f"=> no checkpoint found at '{args.resume}'")
 
@@ -565,7 +601,10 @@ def main_worker(gpu, ngpus_per_node, args):
         validate(val_loader, model, criterion, args, amp_dtype)
         return
 
-    run = RunLog(label=args.run_label, config=vars(args) | {'val_subset_size': len(val_dataset)})
+    run_config = vars(args) | {'val_subset_size': len(val_dataset)}
+    run = (RunLog.restore(args.run_label, run_config, resumed_checkpoint)
+           if resumed_checkpoint is not None
+           else RunLog(label=args.run_label, config=run_config))
 
     # The EMA weights are what gets evaluated and checkpointed once enabled --
     # the whole point of EMA is that the smoothed weights are the ones worth
@@ -599,7 +638,8 @@ def main_worker(gpu, ngpus_per_node, args):
                 **checkpoint_weights(model, ema_model),
                 'best_acc1': best_acc1,
                 'optimizer' : optimizer.state_dict(),
-                'scheduler' : scheduler.state_dict()
+                'scheduler' : scheduler.state_dict(),
+                **run.to_checkpoint(),
             }, is_best, filename=f'checkpoints/{args.run_label}.pth.tar')
 
     peak_vram_gib = torch.cuda.max_memory_allocated() / 2**30 if device.type == 'cuda' else 0.0

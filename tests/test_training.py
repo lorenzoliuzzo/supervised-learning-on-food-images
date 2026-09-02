@@ -1,3 +1,4 @@
+import pathlib
 import sys
 
 import pytest
@@ -113,6 +114,26 @@ def test_gce_loss_is_bounded_unlike_cross_entropy() -> None:
     assert torch.isfinite(loss)
 
 
+def test_similarity_matrix_survives_a_class_partnered_with_everything() -> None:
+    # Leaves no non-partner classes to spread the remaining budget over, which
+    # divided by zero. --similarity-pairs reads an arbitrary user CSV, so the
+    # degenerate shape is reachable without editing code.
+    matrix = build_similarity_matrix(3, [(0, 1), (0, 2)], smoothing=0.1, partner_frac=0.5)
+
+    assert torch.allclose(matrix.sum(dim=1), torch.ones(3), atol=1e-6)
+    assert torch.isfinite(matrix).all()
+    # Class 0 has no "other" bucket left, so its partners absorb the whole
+    # wrong-class budget rather than half of it.
+    assert matrix[0, 1] == matrix[0, 2]
+    assert matrix[0, 1] > 0
+
+
+def test_similarity_matrix_handles_a_single_class() -> None:
+    matrix = build_similarity_matrix(1, [], smoothing=0.1)
+
+    assert torch.allclose(matrix, torch.ones(1, 1), atol=1e-6)
+
+
 def test_similarity_matrix_rows_sum_to_one() -> None:
     matrix = build_similarity_matrix(5, [(0, 1)], smoothing=0.1, partner_frac=0.5)
 
@@ -191,6 +212,35 @@ def test_mix_with_gce_is_refused_before_any_work_happens(
 
     assert excinfo.value.code == 2
     assert "incompatible" in capsys.readouterr().err
+
+
+def test_distributed_without_an_accelerator_is_refused(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # main_worker only wraps the model in DistributedDataParallel under CUDA,
+    # so this combination silently trained N unsynchronised CPU models.
+    monkeypatch.setattr(sys, "argv",
+                        ["main.py", "--multiprocessing-distributed", "--no-accel"])
+
+    with pytest.raises(SystemExit) as excinfo:
+        main.main()
+
+    assert excinfo.value.code == 2
+    assert "requires an accelerator" in capsys.readouterr().err
+
+
+def test_evaluate_with_a_missing_checkpoint_refuses_to_report_a_number(
+    tmp_path: pathlib.Path,
+) -> None:
+    # Previously printed "no checkpoint found" and then evaluated randomly
+    # initialized weights, reporting ~0.4% top-1 as though it were a result.
+    args = main.parser.parse_args([
+        "--evaluate", "--no-accel", "--resume", str(tmp_path / "nope.pth.tar"),
+    ])
+    args.distributed = False
+
+    with pytest.raises(SystemExit, match="nothing to evaluate"):
+        main.main_worker(None, 1, args)
 
 
 def test_similarity_smoothed_loss_accepts_the_soft_target_mixup_produces() -> None:

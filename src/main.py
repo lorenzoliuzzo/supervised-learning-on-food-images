@@ -75,8 +75,9 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'fastest way to use PyTorch for either single node or '
                          'multi node data parallel training')
 parser.add_argument('--val-split', default='splits/val_split.csv', type=str,
-                    help='path to the committed val-dev/val-test split (default: '
-                         'splits/val_split.csv); ignored if the file does not exist')
+                    help='path to the val-dev/val-test split (default: '
+                         'splits/val_split.csv); generate it with make_val_split.py. '
+                         'Required unless --val-subset is all')
 parser.add_argument('--val-subset', default='dev', choices=['dev', 'test', 'all'],
                     help='which half of the val split to evaluate against '
                          '(default: dev). val-test is touched once, for the '
@@ -191,14 +192,20 @@ def load_class_names(path: str | pathlib.Path, num_classes: int = 251) -> list[s
 
 
 def load_val_split(split_path: str | pathlib.Path, name: str) -> set[str] | None:
-    # Returns None for 'all' or a missing split file so callers can fall back
-    # to the unfiltered val set without a special case at every call site.
+    # None means "no filtering", which only 'all' may ask for. A missing file
+    # used to fall back to that too, which silently evaluated against the whole
+    # val set -- val-test included -- and defeated the point of asking for
+    # val-dev. The split is gitignored and regenerated per checkout, so absent
+    # is the expected first-run state and has to be loud.
     if name == 'all':
         return None
     path = pathlib.Path(split_path)
     if not path.exists():
-        warnings.warn(f"val split file not found at '{path}', evaluating against the full val set")
-        return None
+        raise FileNotFoundError(
+            f"val split file not found at '{path}', so --val-subset {name} cannot be honored. "
+            "Generate it with `python src/make_val_split.py` (it is gitignored and "
+            "reproducible from a fixed seed), or pass --val-subset all to evaluate "
+            "against the full val set on purpose.")
     df = pd.read_csv(path)
     return set(df.loc[df['split'] == name, 'img_name'])
 
@@ -246,9 +253,10 @@ class GeneralizedCrossEntropyLoss(nn.Module):
 
 
 def load_similarity_pairs(path: str | pathlib.Path, class_names: list[str]) -> list[tuple[int, int]]:
-    # Mirrors load_val_split's missing-file fallback: an empty pair list makes
-    # build_similarity_matrix produce ordinary uniform smoothing, so callers
-    # don't need a special case for "the file hasn't been generated yet".
+    # Unlike load_val_split, a missing file here is recoverable rather than
+    # fatal: an empty pair list makes build_similarity_matrix produce ordinary
+    # uniform smoothing, so the run degrades to --loss ce's target distribution
+    # instead of scoring against the wrong images.
     path = pathlib.Path(path)
     if not path.exists():
         warnings.warn(f"similarity pairs file not found at '{path}', "
@@ -312,7 +320,14 @@ class SimilaritySmoothedCrossEntropyLoss(nn.Module):
         self.register_buffer('smoothing_matrix', smoothing_matrix)
 
     def forward(self, output: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        soft_targets = self.smoothing_matrix[target]
+        # Mixup/CutMix hand down a soft (N, K) target instead of hard indices.
+        # The hard case is that same lookup written as a one-hot matmul --
+        # e_y @ M is row y of M -- so a mixed target smooths to the matching
+        # blend of rows rather than crashing on the index lookup.
+        soft_targets = (
+            self.smoothing_matrix[target] if target.ndim == 1
+            else target.to(self.smoothing_matrix.dtype) @ self.smoothing_matrix
+        )
         log_probs = torch.log_softmax(output, dim=1)
         return -(soft_targets * log_probs).sum(dim=1).mean()
 
@@ -326,6 +341,14 @@ def main():
         parser.error('--init-encoder and --resume are mutually exclusive: '
                      '--init-encoder starts a new run from pretrained weights, '
                      '--resume continues an existing one')
+
+    # ce and sim both take the soft (N, K) target Mixup/CutMix produce. GCE's
+    # L_q = (1 - p_y^q)/q is defined against a single true class and has no
+    # settled soft-target form, so this is refused rather than guessed at.
+    if args.mix != 'none' and args.loss == 'gce':
+        parser.error(f'--mix {args.mix} and --loss gce are incompatible: Mixup/CutMix '
+                     'replace the hard label with a distribution over classes, which '
+                     'GCE has no defined form for. Use --loss ce or --loss sim.')
 
     if args.seed is not None:
         random.seed(args.seed)
@@ -484,10 +507,10 @@ def main_worker(gpu, ngpus_per_node, args):
                 loc = f'{device.type}:{args.gpu}'
                 checkpoint = torch.load(args.resume, map_location=loc)
             args.start_epoch = checkpoint['epoch']
+            # A plain float, not a tensor as in the reference script this was
+            # adapted from -- validate() returns float(top1.avg) -- so there is
+            # no device to move it to.
             best_acc1 = checkpoint['best_acc1']
-            if args.gpu is not None:
-                # best_acc1 may be from a checkpoint from a different GPU
-                best_acc1 = best_acc1.to(args.gpu)
             model.load_state_dict(checkpoint['state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer'])
             scheduler.load_state_dict(checkpoint['scheduler'])

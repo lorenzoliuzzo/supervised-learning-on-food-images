@@ -1,3 +1,5 @@
+import sys
+
 import pytest
 import torch
 import torch.nn as nn
@@ -5,6 +7,7 @@ import torchvision.transforms as transforms
 from PIL import Image
 from torchvision.transforms import v2
 
+import main
 from main import (
     WARMUP_EPOCHS,
     GeneralizedCrossEntropyLoss,
@@ -170,6 +173,64 @@ def test_similarity_smoothed_loss_penalizes_confident_wrong_more_than_confident_
     output_wrong[0, 0] = 20.0  # confidently predicts a wrong class
 
     assert criterion(output_correct, target).item() < criterion(output_wrong, target).item()
+
+
+@pytest.mark.parametrize("mix", ["mixup", "cutmix"])
+def test_mix_with_gce_is_refused_before_any_work_happens(
+    monkeypatch: pytest.MonkeyPatch, mix: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # GCE indexes the hard label, so this combination crashed on the first
+    # batch -- after building the model and the loaders. argparse rejects it
+    # up front instead; both guards in main() run before any device work.
+    monkeypatch.setattr(sys, "argv", ["main.py", "--mix", mix, "--loss", "gce"])
+
+    with pytest.raises(SystemExit) as excinfo:
+        main.main()
+
+    assert excinfo.value.code == 2
+    assert "incompatible" in capsys.readouterr().err
+
+
+def test_similarity_smoothed_loss_accepts_the_soft_target_mixup_produces() -> None:
+    # --mix mixup --loss sim used to die here on `smoothing_matrix[target]`:
+    # Mixup hands down a float (N, K) distribution, not hard indices.
+    matrix = build_similarity_matrix(4, [(0, 1)], smoothing=0.1)
+    criterion = SimilaritySmoothedCrossEntropyLoss(matrix)
+    output = torch.randn(3, 4)
+    soft_target = torch.zeros(3, 4)
+    soft_target[:, 0] = 0.7
+    soft_target[:, 2] = 0.3
+
+    loss = criterion(output, soft_target)
+
+    assert loss.ndim == 0
+    assert torch.isfinite(loss)
+
+
+def test_similarity_smoothed_loss_soft_target_agrees_with_the_hard_one_when_one_hot() -> None:
+    # A one-hot soft target must take the identical path to the index lookup,
+    # or the two --mix legs of an ablation aren't measuring the same loss.
+    matrix = build_similarity_matrix(4, [(0, 1)], smoothing=0.1)
+    criterion = SimilaritySmoothedCrossEntropyLoss(matrix)
+    output = torch.randn(3, 4)
+    hard_target = torch.tensor([0, 2, 3])
+    one_hot = torch.nn.functional.one_hot(hard_target, num_classes=4).float()
+
+    assert torch.allclose(criterion(output, one_hot), criterion(output, hard_target), atol=1e-6)
+
+
+def test_similarity_smoothed_loss_soft_target_blends_the_matrix_rows() -> None:
+    # A 50/50 mix of classes 0 and 2 should cost the mean of what each costs
+    # alone -- cross-entropy is linear in the target, and that linearity is
+    # what makes the matmul form correct rather than merely non-crashing.
+    matrix = build_similarity_matrix(4, [(0, 1)], smoothing=0.1)
+    criterion = SimilaritySmoothedCrossEntropyLoss(matrix)
+    output = torch.randn(1, 4)
+    blend = torch.zeros(1, 4)
+    blend[0, 0] = blend[0, 2] = 0.5
+
+    expected = 0.5 * (criterion(output, torch.tensor([0])) + criterion(output, torch.tensor([2])))
+    assert torch.allclose(criterion(output, blend), expected, atol=1e-6)
 
 
 def test_mixup_replaces_hard_targets_with_a_soft_label_over_the_batch() -> None:

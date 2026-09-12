@@ -20,17 +20,18 @@
     251 fine-grained food categories of FoodX-251, under a hard budget of ten
     million trainable parameters and a single 8GB laptop GPU. We search among
     parameter-matched trunk variants using short, fixed-seed proxy runs on a
-    held-out development split, then validate the selected trunk with a full
-    training run reaching 61.57% top-1 / 85.67% top-5 accuracy before any
-    recipe tuning. We describe a set of opt-in recipe extensions -- stronger
-    augmentation, Mixup/CutMix, an exponential moving average, a noise-robust
-    loss -- implemented and awaiting ablation, and outline a planned
-    comparison against self-supervised pretraining under an equal-GPU-hour
-    budget; both are reported where results exist and marked otherwise.
-    Throughout, we find that measured wall-clock and memory behavior on
-    commodity hardware -- channel-width alignment, spatial resolution, and
-    thermal throttling -- shape the final design as much as raw parameter or
-    FLOP counts do.
+    held-out development split, then ablate six training-recipe axes --
+    learning rate, augmentation strength, Mixup/CutMix, an exponential moving
+    average, a noise-robust loss, batch size, and the random-resized-crop
+    scale floor -- against a plain label-smoothed cross-entropy baseline,
+    none of which improve on it. The resulting recipe, trained for a full 90
+    epochs, reaches 63.83% top-1 / 87.39% top-5 accuracy on a held-out test
+    split touched exactly once. We outline a planned comparison against
+    self-supervised pretraining under an equal-GPU-hour budget, reported
+    where results exist and marked otherwise. Throughout, we find that
+    measured wall-clock and memory behavior on commodity hardware --
+    channel-width alignment, spatial resolution, and thermal throttling --
+    shape the final design as much as raw parameter or FLOP counts do.
   ],
   bibliography: bibliography("main.bib"),
   accepted: false,
@@ -61,10 +62,11 @@ a measured, budget-constrained architecture search over residual-trunk
 variants (@sec-arch-search); a from-scratch training recipe modernized with
 mixed-precision training, a cosine schedule, and label smoothing, plus a set
 of opt-in extensions -- stronger augmentation, Mixup/CutMix, an exponential
-moving average, a noise-robust loss -- now implemented and awaiting ablation
-(@sec-recipe-ablation); a full-length training run validating the selected
-trunk (@sec-full-run); and a planned comparison of supervised training against
-self-supervised pretraining under an equal-GPU-hour budget (@sec-ssl).
+moving average, a noise-robust loss -- implemented and ablated, none of which
+improve on the plain recipe (@sec-recipe-ablation); a full-length training run
+validating the selected trunk and tuned recipe (@sec-full-run); and a planned
+comparison of supervised training against self-supervised pretraining under an
+equal-GPU-hour budget (@sec-ssl).
 
 One design choice is worth flagging before the rest. Despite FoodX-251's
 long-tailed reputation, the training split we measured is close to
@@ -72,9 +74,9 @@ class-balanced (median 471 images per class; a single 34-image class drives
 the oft-cited 19.3x imbalance ratio), so class-balanced losses, logit
 adjustment, and long-tail-specific training are out of scope here -- the real
 distributional problem is label noise, not long-tailedness
-(@dataset-protocol). More generally: the architecture search and one full
-training run are complete at the time of writing; the recipe ablation and the
-self-supervised comparison are in progress, and are marked accordingly below
+(@dataset-protocol). More generally: the architecture search, recipe
+ablation, and full training run are complete at the time of writing; the
+self-supervised comparison is in progress, and is marked accordingly below
 rather than reported with numbers we have not measured.
 
 = Related work <related-work>
@@ -293,18 +295,93 @@ baseline underperforms expectations.
 
 == Recipe ablation <sec-recipe-ablation>
 
-#todo[
-  Not yet run. Planned: fixed-seed, 15-epoch `val-dev` proxies on the
-  selected trunk, sweeping (i) learning rate in \{0.05, 0.1, 0.2, 0.4\} at
-  batch 256; (ii) TrivialAugment vs. RandAugment; (iii) Mixup/CutMix on/off;
-  (iv) EMA on/off; (v) batch size in \{160, 256, 512\} with learning rate
-  scaled linearly -- throughput is flat across this range at fixed
-  resolution (1738-1785 img/s, batch 160-768), so this axis is a
-  gradient-noise and batch-norm-statistics question, not a throughput one;
-  (vi) cross-entropy with label smoothing vs. Generalized Cross Entropy,
-  adopted only if it wins. Results and the resulting recipe decision replace
-  this paragraph once measured.
-]
+Six training-recipe axes were swept as fixed-seed, 15-epoch `val-dev`
+proxies on the selected trunk (`benchmarks/proxy_sweep.py`), confirmed with
+paired McNemar's tests on the shared `val-dev` predictions wherever the
+point-estimate gap was close enough to need one
+(`benchmarks/significance_test.py`).
+
+#paragraph[Learning rate.] Sweeping $\{0.05, 0.1, 0.2, 0.4\}$ at batch 256
+gave a clean diminishing-returns curve (43.96%, 49.41%, 52.56%, 54.02%
+top-1); extending to $\{0.6, 0.8\}$ continued the pattern (54.96%, 55.58%),
+each doubling buying roughly half the previous gain ($+5.45, +3.15, +1.46,
++0.94, +0.62$ points). We stop at *lr=0.8*: the next doubling would buy an
+estimated 0.3-0.4 points against a visibly noisier validation curve.
+
+#paragraph[Augmentation.] TrivialAugment and RandAugment both trail the
+no-augmentation control by about 3 points at 15 epochs (52.09%, 52.60% vs.
+55.58%), but their train loss is still well above the control's at that
+point, so a matched 30-epoch rematch was run for RandAugment: the gap
+narrows to 0.84 points (61.27% vs. 60.43%), and a paired McNemar's test on
+the discordant `val-dev` predictions finds it *not statistically
+significant* ($p=0.075$, $n=855$ discordant). Plain carries forward on an
+unbeaten record, not a proven margin over RandAugment specifically.
+
+#paragraph[Mixup, CutMix, EMA, and Generalized Cross Entropy.] All four lose
+decisively against the 15-epoch control (55.58%): Mixup 42.95%, CutMix
+48.84%, EMA (decay 0.999) 39.88%, and GCE ($q=0.7$) 22.23%, each at
+$p<0.0001$. GCE's collapse is the most striking -- 119 of 251 classes reach
+zero accuracy, confidently wrong rather than merely underconfident (mean
+confidence on wrong predictions 0.49, the worst calibration of any recipe
+tested, ECE 0.328) -- consistent with `lr=0.8` being tuned for
+cross-entropy's loss landscape rather than GCE's bounded one. EMA's collapse
+is consistent with its roughly 1,000-step averaging window not having caught
+up within this proxy's roughly 6,945 steps. Neither failure rules out the
+technique outright; both would need their own learning-rate search to judge
+fairly, which this budget does not spend.
+
+#paragraph[Batch size.] Batch 160/256/512, with learning rate scaled
+linearly (0.5/0.8/1.6), land within 0.36 points of each other and every
+pairwise McNemar's test is non-significant ($p gt.eq 0.49$). Batch size is a
+non-lever for this recipe at fixed resolution, matching the flat throughput
+already measured in @sec-arch-search.
+
+#paragraph[Crop-scale floor.] Raising `RandomResizedCrop`'s minimum scale
+from the ImageNet-inherited 0.08 to 0.25 or 0.40 closes the train/validation
+gap that motivated the sweep ($+11.05$ to $+4.31$ to $-0.56$ points), but
+validation accuracy does not follow: 0.25 ties the control and 0.40 is
+significantly worse ($-1.17$ points, $p=0.0232$). The low-scale crop is
+doing double duty as both regularizer and view-diversity source; relaxing it
+trades away diversity without buying back epochs. Default stays at 0.08.
+
+#figure(
+  caption: [
+    Recipe axes ablated against the plain, label-smoothed cross-entropy
+    control (15-epoch `val-dev` proxy unless noted), on the selected trunk.
+    Deltas and significance are paired McNemar's tests on the same
+    `val-dev` images.
+  ],
+  placement: top,
+  table(
+    columns: 4,
+    align: (left, right, right, left),
+    stroke: none,
+    toprule,
+    table.header([Axis], [val-dev top-1], [Δ vs. control], [McNemar p]),
+    midrule,
+    [Control (plain, lr=0.8)], [55.58%], [--], [--],
+    [TrivialAugment], [52.09%], [$-3.49$], [not tested],
+    [RandAugment (15ep)], [52.60%], [$-2.98$], [not tested],
+    [RandAugment (30ep, matched)], [60.43% #footnote[Against a 30-epoch control at 61.27%; not comparable to the 15-epoch control row above.]], [$-0.84$], [0.0750],
+    [Mixup], [42.95%], [$-12.63$], [$<0.0001$],
+    [CutMix], [48.84%], [$-6.74$], [$<0.0001$],
+    [EMA (decay 0.999)], [39.88%], [$-15.70$], [$<0.0001$],
+    [GCE loss ($q=0.7$)], [22.23%], [$-33.35$], [$<0.0001$],
+    [Batch 160 (lr=0.5)], [55.85%], [$+0.18$], [0.7407],
+    [Batch 512 (lr=1.6)], [55.30%], [$-0.36$], [0.4868],
+    [Crop-scale 0.25], [55.71%], [$+0.05$], [0.9465],
+    [Crop-scale 0.40], [54.49%], [$-1.17$], [0.0232],
+    botrule,
+  ),
+) <table-recipe-ablation>
+
+#paragraph[Adopted recipe.] Nothing tested beats the plain recipe --
+label-smoothed cross-entropy, no extra augmentation, no Mixup/CutMix, no
+EMA, at *lr=0.8, batch 256, crop-scale-min 0.08* -- and it carries forward
+unmodified into the full run (@sec-full-run). RandAugment is the one axis
+not decisively ruled out: its matched-epoch gap is real in direction but not
+in significance, and it remains the first candidate worth revisiting if the
+full run underperforms.
 
 == Full supervised training run <sec-full-run>
 
@@ -326,7 +403,18 @@ is not the project's final supervised number, which is what
 with FixRes-style test-time resolution correction @touvron2019fixres (train
 at 176px, evaluate at 224px center crop).
 
-#todo[`val-test` headline number: pending the recipe decision in @sec-recipe-ablation.]
+The tuned recipe adopted in @sec-recipe-ablation -- the same trunk and GAP
+head, plain label-smoothed cross-entropy, lr=0.8, batch 256, crop-scale-min
+0.08, every setting the recipe search settled on, unmodified -- was then
+trained for the same 90 epochs. It reached *64.36% `val-dev` top-1 / 87.51%
+top-5* at its best checkpoint (epoch 86), and, read against `val-test`
+exactly once, *63.83% top-1 / 81.79% top-3 / 87.39% top-5* -- this
+report's headline number. The run took 2h05m wall-clock at 1.99 GiB peak
+VRAM, and the train/validation gap that motivated the crop-scale
+investigation above closed from $+11.05$ points at epoch 15 to near zero by
+epoch 90 (final-epoch train top-1 64.88% vs. val top-1 64.26%): the model
+needed the full schedule to converge, and nothing in @sec-recipe-ablation
+sped that up because, per the crop-scale result, nothing needed to.
 
 == Self-supervised comparison <sec-ssl>
 

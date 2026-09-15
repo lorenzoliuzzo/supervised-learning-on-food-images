@@ -30,12 +30,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from main import (  # noqa: E402
     FoodX251Dataset,
     dataset_paths,
-    eval_resolution,
     load_val_split,
     select_amp_dtype,
 )
 from model import FoodCNN  # noqa: E402
-from simsiam import collapse_metrics, extract_features, knn_accuracy  # noqa: E402
+
+# build_eval_transform is imported rather than reimplemented on purpose: an
+# anchor is only comparable to a probe reading if both saw the identical
+# pipeline, so the two must not be able to drift apart.
+from simsiam import (  # noqa: E402
+    build_eval_transform,
+    collapse_metrics,
+    extract_features,
+    knn_accuracy,
+)
 
 RANDOM_INIT = "random"
 SUPERVISED = "checkpoints/full-90ep-lr0.8-best.pth.tar"
@@ -50,16 +58,6 @@ class Probe:
     effective_rank: float
     mean_norm: float
     frac_nonneg: float
-
-
-def build_eval_transform(normalize: transforms.Normalize, crop_size: int) -> transforms.Compose:
-    resize, crop = eval_resolution(crop_size)
-    return transforms.Compose([
-        transforms.Resize(resize),
-        transforms.CenterCrop(crop),
-        transforms.ToTensor(),
-        normalize,
-    ])
 
 
 def load_encoder(source: str, device: torch.device) -> FoodCNN:
@@ -120,7 +118,6 @@ def main() -> None:
                             "loader-bound, so the full 118,475 costs minutes")
     parser.add_argument("--batch-size", default=256, type=int)
     parser.add_argument("--workers", default=4, type=int)
-    parser.add_argument("--crop-size", default=176, type=int)
     parser.add_argument("--val-split", default="splits/val_split.csv")
     parser.add_argument("--val-subset", default="dev", choices=["dev", "test", "all"])
     args = parser.parse_args()
@@ -129,7 +126,7 @@ def main() -> None:
     amp_dtype = select_amp_dtype(device)
 
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    eval_transform = build_eval_transform(normalize, args.crop_size)
+    eval_transform = build_eval_transform(normalize)
     (train_dir, train_labels), (val_dir, val_labels) = dataset_paths(args.data)
 
     bank_dataset = FoodX251Dataset(train_dir, train_labels, eval_transform)

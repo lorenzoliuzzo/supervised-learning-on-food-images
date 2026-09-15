@@ -418,6 +418,7 @@ def main() -> None:
            if resumed_checkpoint is not None
            else RunLog(label=args.run_label, config=vars(args)))
 
+    log_path = None
     for epoch in range(args.start_epoch, args.epochs):
         lr_used = optimizer.param_groups[0]['lr']
         loss = train_one_epoch(
@@ -460,7 +461,12 @@ def main() -> None:
             torch.cuda.max_memory_allocated() / 2**30 if device.type == 'cuda' else 0.0
         )
         log_path = run.save(pathlib.Path(args.log_dir), peak_vram_gib=peak_vram_gib)
-    print(f"=> wrote run log to '{log_path}'")
+
+    if log_path is None:
+        print(f"=> nothing to do: checkpoint is already at epoch {args.start_epoch} "
+              f"of {args.epochs}")
+    else:
+        print(f"=> wrote run log to '{log_path}'")
 
 
 def train_one_epoch(

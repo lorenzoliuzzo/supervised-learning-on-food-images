@@ -60,7 +60,12 @@ class Probe:
     frac_nonneg: float
 
 
-def load_encoder(source: str, device: torch.device) -> FoodCNN:
+def load_encoder(source: str, device: torch.device, seed: int = 0) -> FoodCNN:
+    # The random-init anchor is a *sample*, not a constant: unseeded, it moved
+    # 2.80% -> 3.36% kNN and 4.8 -> 4.4 effective rank between two runs of this
+    # script. That is the same order as a real pretrain's first probe interval,
+    # so an unseeded floor can flatter or damn a run by chance. Seed it.
+    torch.manual_seed(seed)
     model = FoodCNN(num_classes=251)
     if source != RANDOM_INIT:
         state = torch.load(source, map_location="cpu", weights_only=False)["state_dict"]
@@ -84,8 +89,9 @@ def load_encoder(source: str, device: torch.device) -> FoodCNN:
 
 
 @torch.no_grad()
-def probe(label: str, source: str, bank_loader, query_loader, device, amp_dtype) -> Probe:
-    encoder = load_encoder(source, device)
+def probe(label: str, source: str, bank_loader, query_loader, device, amp_dtype,
+          seed: int = 0) -> Probe:
+    encoder = load_encoder(source, device, seed)
     bank, bank_labels = extract_features(bank_loader, encoder, device, amp_dtype)
     query, query_labels = extract_features(query_loader, encoder, device, amp_dtype)
 
@@ -120,6 +126,9 @@ def main() -> None:
     parser.add_argument("--workers", default=4, type=int)
     parser.add_argument("--val-split", default="splits/val_split.csv")
     parser.add_argument("--val-subset", default="dev", choices=["dev", "test", "all"])
+    parser.add_argument("--seed", default=0, type=int,
+                       help="seeds the random-init anchor, which is otherwise a "
+                            "different encoder on every run (default: 0)")
     args = parser.parse_args()
 
     device = torch.accelerator.current_accelerator()
@@ -149,7 +158,7 @@ def main() -> None:
     sources += [(Path(path).stem, path) for path in args.checkpoints]
 
     results = [
-        probe(label, source, bank_loader, query_loader, device, amp_dtype)
+        probe(label, source, bank_loader, query_loader, device, amp_dtype, args.seed)
         for label, source in sources
     ]
 

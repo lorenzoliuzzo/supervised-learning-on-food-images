@@ -435,10 +435,20 @@ def main() -> None:
                 bank, bank_labels, query, query_labels, args.knn_k, args.knn_t)
             feat_std, eff_rank = collapse_metrics(query)
             del bank, query
-            print(f"=> epoch {epoch}: kNN top-1 {knn_acc1:.2f}%  "
-                  f"feat_std {feat_std:.4f} (random 0.0074, supervised 0.0341)  "
+            # kNN leads and carries the anchors because it is the quality
+            # measure -- the standard frozen-feature evaluation, and the one
+            # that tracks whether the representation is becoming useful.
+            # Effective rank follows as a collapse diagnostic only: the two
+            # genuinely move in opposite directions (a run whose rank
+            # saturated at ~15 kept gaining kNN), so reading rank as quality
+            # calls a working pretrain dead. feat_std is printed for the
+            # record but has never moved outside 0.0218-0.0225 on this model,
+            # because ReLU confines the features to the positive orthant.
+            print(f"=> epoch {epoch}: kNN top-1 {knn_acc1:.2f}% "
+                  f"(random 2.80, supervised 61.16)  "
                   f"effective rank {eff_rank:.1f}/512 "
-                  f"(random 4.8, supervised 184.7)")
+                  f"(random 4.8, supervised 184.7; collapse check only)  "
+                  f"feat_std {feat_std:.4f}")
 
         run.record_ssl(epoch, lr_used, loss, knn_acc1, feat_std, eff_rank)
         scheduler.step()

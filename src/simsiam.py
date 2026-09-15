@@ -349,7 +349,17 @@ def main() -> None:
     print(f"=> pretraining on {len(train_dataset)} unlabeled images ({args.pretrain_data})")
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True,
-        num_workers=args.workers, pin_memory=True, persistent_workers=True, drop_last=True)
+        num_workers=args.workers, pin_memory=False, persistent_workers=True,
+        prefetch_factor=1, drop_last=True)
+    # pin_memory off and prefetch_factor down from the default 2: this loader
+    # is CPU-bound (see the worker-count comment below), so the GPU is rarely
+    # waiting on host-to-device transfer -- pinned memory buys nothing here
+    # but is not swappable, so it was fighting the page cache for the
+    # dataset's own ~3 GiB under memory pressure, which is what turns a
+    # loader-bound workload into a disk-IO-bound one: evicted pages get
+    # re-read from disk every epoch instead of served from cache. A shallower
+    # prefetch queue caps how many in-flight batches (12 workers x 2 views x
+    # batch 256 each) can be resident at once.
 
     # The probe's bank is the labelled train set and its queries are val-dev,
     # both under the clean eval transform. Built once and reused every probe.
@@ -365,13 +375,20 @@ def main() -> None:
                 len(bank_dataset), generator=torch.Generator().manual_seed(251)
             )[:args.knn_bank_size]
             bank_dataset = torch.utils.data.Subset(bank_dataset, indices.tolist())
+        # Deliberately not args.workers: train_loader's workers are
+        # persistent (they stay alive, idle, between epochs so the next
+        # epoch doesn't pay a respawn cost) and are still resident during the
+        # probe. A second args.workers-sized pool on top of that pool is what
+        # exhausted /dev/shm at epoch 7 of the first gate run; a handful of
+        # workers is enough for an evaluation-only pass with no augmentation.
+        probe_workers = min(args.workers, 4)
         bank_loader = torch.utils.data.DataLoader(
             bank_dataset,
-            batch_size=args.batch_size, shuffle=False, num_workers=args.workers, pin_memory=True)
+            batch_size=args.batch_size, shuffle=False, num_workers=probe_workers, pin_memory=False)
         query_loader = torch.utils.data.DataLoader(
             FoodX251Dataset(val_dir, val_labels, eval_transform,
                             subset=load_val_split(args.val_split, args.val_subset)),
-            batch_size=args.batch_size, shuffle=False, num_workers=args.workers, pin_memory=True)
+            batch_size=args.batch_size, shuffle=False, num_workers=probe_workers, pin_memory=False)
         probe_loaders = (bank_loader, query_loader)
 
     run = RunLog(label=args.run_label, config=vars(args))
@@ -406,8 +423,16 @@ def main() -> None:
             'scheduler': scheduler.state_dict(),
         }, is_best=False, filename=f'checkpoints/{args.run_label}.pth.tar')
 
-    peak_vram_gib = torch.cuda.max_memory_allocated() / 2**30 if device.type == 'cuda' else 0.0
-    log_path = run.save(pathlib.Path(args.log_dir), peak_vram_gib=peak_vram_gib)
+        # Written every epoch, not just at the end: a crash mid-run (the
+        # probe loaders hit /dev/shm exhaustion at epoch 7 of the first gate
+        # attempt) previously left the checkpoint resumable but silently
+        # discarded every epoch's logged loss and kNN history up to that
+        # point -- the resumability the roadmap calls for covers weights,
+        # not this. Same filename every epoch, so it overwrites in place.
+        peak_vram_gib = (
+            torch.cuda.max_memory_allocated() / 2**30 if device.type == 'cuda' else 0.0
+        )
+        log_path = run.save(pathlib.Path(args.log_dir), peak_vram_gib=peak_vram_gib)
     print(f"=> wrote run log to '{log_path}'")
 
 

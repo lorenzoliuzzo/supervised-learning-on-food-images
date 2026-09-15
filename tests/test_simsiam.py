@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 import torch
 from PIL import Image
+from torch.optim.lr_scheduler import LambdaLR
 from torchvision.transforms import Normalize
 
 from main import load_encoder_weights
@@ -14,8 +15,10 @@ from simsiam import (
     UnlabeledImageDataset,
     build_ssl_transform,
     collapse_metrics,
+    cosine_lr,
     knn_accuracy,
     negative_cosine_similarity,
+    param_groups,
     pretrain_dirs,
     simsiam_loss,
 )
@@ -210,3 +213,29 @@ def test_load_encoder_weights_transfers_encoder_but_not_classifier(tmp_path) -> 
     assert not torch.equal(
         fresh_model.classifier[-1].weight, pretrained_model.encoder.classifier[-1].weight
     )
+
+
+def test_param_groups_cover_every_parameter() -> None:
+    model = SimSiamModel(FoodCNN(num_classes=251))
+    grouped = {id(p) for group in param_groups(model) for p in group['params']}
+    assert grouped == {id(p) for p in model.parameters()}
+
+
+def test_predictor_lr_stays_constant_while_trunk_decays() -> None:
+    model = SimSiamModel(FoodCNN(num_classes=251))
+    optimizer = torch.optim.SGD(param_groups(model), lr=0.05, momentum=0.9)
+    scheduler = LambdaLR(optimizer, lr_lambda=[
+        lambda epoch: cosine_lr(epoch, 50),
+        lambda _epoch: 1.0,
+    ])
+
+    trunk_lrs = []
+    for _ in range(50):
+        optimizer.step()
+        trunk_lrs.append(optimizer.param_groups[0]['lr'])
+        assert optimizer.param_groups[1]['lr'] == pytest.approx(0.05)
+        scheduler.step()
+
+    assert trunk_lrs[0] == pytest.approx(0.05)
+    assert trunk_lrs[-1] < 1e-3
+    assert trunk_lrs == sorted(trunk_lrs, reverse=True)

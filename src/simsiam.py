@@ -266,8 +266,12 @@ def knn_accuracy(
 def collapse_metrics(features: torch.Tensor) -> tuple[float, float]:
     # Two numbers that separate a working pretrain from a collapsed one, which
     # the loss cannot. feat_std is the per-dimension std of the L2-normalized
-    # features averaged over dims: it sits near 1/sqrt(d) for a healthy
-    # representation and decays to 0 as every image maps to the same vector.
+    # features averaged over dims. Do NOT read it against 1/sqrt(d): that
+    # reference describes SimSiam's *projector* output, and this runs on the
+    # encoder's, which is non-negative because ResidualBlock applies ReLU after
+    # the add -- every vector sits in the positive orthant, where per-dimension
+    # std is structurally lower. Measured on this model: 0.0074 at random init,
+    # 0.0341 for the 63.83% supervised checkpoint. Those are the anchors.
     # effective_rank is exp(entropy of the normalized covariance eigenvalues) --
     # how many dimensions are actually used, out of d.
     feat_std = features.std(dim=0).mean().item()
@@ -291,6 +295,18 @@ def build_ssl_transform(normalize: transforms.Normalize) -> transforms.Compose:
         transforms.ToTensor(),
         normalize,
     ])
+
+
+def param_groups(model: SimSiamModel) -> list[dict[str, object]]:
+    # Group 1 is the predictor, held at a constant LR while group 0 follows the
+    # cosine, per Chen & He section 4.2. The predictor has to track the
+    # projector's *current* output distribution; decaying its LR alongside the
+    # encoder's leaves it chasing a target it can no longer catch. Order
+    # matters -- main() pairs these with lr_lambdas positionally.
+    return [
+        {'params': [*model.encoder.parameters(), *model.projector.parameters()]},
+        {'params': model.predictor.parameters()},
+    ]
 
 
 def cosine_lr(epoch: int, epochs: int) -> float:
@@ -324,9 +340,12 @@ def main() -> None:
     # lr scales linearly with batch size, per the paper's linear scaling rule.
     lr = args.lr * args.batch_size / 256
     optimizer = torch.optim.SGD(
-        model.parameters(), lr, momentum=args.momentum,
+        param_groups(model), lr, momentum=args.momentum,
         weight_decay=args.weight_decay, nesterov=True)
-    scheduler = LambdaLR(optimizer, lr_lambda=lambda epoch: cosine_lr(epoch, args.epochs))
+    scheduler = LambdaLR(optimizer, lr_lambda=[
+        lambda epoch: cosine_lr(epoch, args.epochs),
+        lambda _epoch: 1.0,
+    ])
 
     resumed_checkpoint = None
     if args.resume:
@@ -416,8 +435,9 @@ def main() -> None:
             feat_std, eff_rank = collapse_metrics(query)
             del bank, query
             print(f"=> epoch {epoch}: kNN top-1 {knn_acc1:.2f}%  "
-                  f"feat_std {feat_std:.4f} (healthy ~{1 / 512 ** 0.5:.4f})  "
-                  f"effective rank {eff_rank:.1f}/512")
+                  f"feat_std {feat_std:.4f} (random 0.0074, supervised 0.0341)  "
+                  f"effective rank {eff_rank:.1f}/512 "
+                  f"(random 4.8, supervised 184.7)")
 
         run.record_ssl(epoch, lr_used, loss, knn_acc1, feat_std, eff_rank)
         scheduler.step()

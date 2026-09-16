@@ -87,7 +87,7 @@ parser.add_argument('--run-label', default='run', type=str,
 parser.add_argument('--log-dir', default='runs', type=str,
                     help='directory per-run JSON logs are written to')
 parser.add_argument('--init-encoder', default='', type=str, metavar='PATH',
-                    help='path to a simsiam.py checkpoint (Phase E) to seed the trunk '
+                    help='path to a simsiam.py or main.py checkpoint to seed the trunk '
                          'from -- only features/avgpool weights are copied, the '
                          'classifier stays randomly initialized. Mutually exclusive '
                          'with --resume: this starts a new supervised run from '
@@ -818,21 +818,40 @@ def validate(val_loader, model, criterion, args, amp_dtype):
 
 
 def load_encoder_weights(model: nn.Module, checkpoint_path: str) -> None:
-    # A simsiam.py checkpoint's state_dict keys are prefixed `encoder.` (the
-    # FoodCNN instance SimSiamModel wraps) -- but that FoodCNN carries its
-    # own unused classifier too, so filtering on the `encoder.` prefix alone
-    # would smuggle those weights in as well. `encoder.features.` is the
-    # trunk specifically (avgpool has no parameters of its own).
+    # Two checkpoint layouts carry a usable trunk: a simsiam.py checkpoint
+    # prefixes its keys `encoder.` (the FoodCNN that SimSiamModel wraps),
+    # while a main.py checkpoint does not. Matching on `features.` rather than
+    # the bare `encoder.` prefix accepts both and keeps the wrapped FoodCNN's
+    # own unused classifier out of it either way (avgpool has no parameters).
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
     state_dict = checkpoint['state_dict']
     encoder_state = {
-        key[len('encoder.'):]: value
+        key.removeprefix('encoder.'): value
         for key, value in state_dict.items()
-        if key.startswith('encoder.features.')
+        if key.startswith(('features.', 'encoder.features.'))
     }
+    # strict=False is needed to leave the classifier alone, which also means it
+    # will happily accept a checkpoint whose keys match nothing at all and
+    # train from scratch while the log claims otherwise. Both failures below
+    # were real: `features.`-only matching silently no-op'd on every main.py
+    # checkpoint until 2026-09-16.
+    if not encoder_state:
+        raise ValueError(
+            f"'{checkpoint_path}' has no trunk weights to load: none of its "
+            f"{len(state_dict)} state_dict keys start with 'features.' or "
+            "'encoder.features.'. Expected a main.py or simsiam.py checkpoint."
+        )
     missing, unexpected = model.load_state_dict(encoder_state, strict=False)
+    unfilled = [key for key in missing if key.startswith('features.')]
+    if unfilled or unexpected:
+        raise ValueError(
+            f"'{checkpoint_path}' does not match this FoodCNN's trunk: "
+            f"{len(unfilled)} trunk tensors left uninitialized "
+            f"(e.g. {unfilled[:3]}), {len(unexpected)} unexpected "
+            f"(e.g. {list(unexpected)[:3]}). Same architecture required."
+        )
     print(f"=> loaded encoder weights from '{checkpoint_path}' "
-          f"({len(encoder_state)} tensors; missing={len(missing)}, unexpected={len(unexpected)})")
+          f"({len(encoder_state)} trunk tensors; classifier left random)")
 
 
 def checkpoint_weights(model: nn.Module, ema_model: nn.Module | None) -> dict[str, object]:

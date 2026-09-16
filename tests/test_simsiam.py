@@ -217,6 +217,48 @@ def test_load_encoder_weights_transfers_encoder_but_not_classifier(tmp_path) -> 
     )
 
 
+def test_load_encoder_weights_accepts_a_supervised_checkpoint(tmp_path) -> None:
+    torch.manual_seed(0)
+    supervised = FoodCNN(num_classes=251)
+    checkpoint_path = tmp_path / 'supervised.pth.tar'
+    # main.py's layout: `features.*` / `classifier.*`, no `encoder.` prefix.
+    torch.save({'epoch': 86, 'state_dict': supervised.state_dict()}, checkpoint_path)
+
+    fresh = FoodCNN(num_classes=251)
+    load_encoder_weights(fresh, str(checkpoint_path))
+
+    for key, value in supervised.features.state_dict().items():
+        assert torch.equal(fresh.features.state_dict()[key], value)
+    assert not torch.equal(
+        fresh.classifier[-1].weight, supervised.classifier[-1].weight
+    )
+
+
+def test_load_encoder_weights_rejects_a_checkpoint_with_no_trunk(tmp_path) -> None:
+    checkpoint_path = tmp_path / 'headless.pth.tar'
+    torch.save({'state_dict': {'classifier.0.weight': torch.zeros(2, 2)}}, checkpoint_path)
+
+    fresh = FoodCNN(num_classes=251)
+    with pytest.raises(ValueError, match='no trunk weights'):
+        load_encoder_weights(fresh, str(checkpoint_path))
+
+
+def test_load_encoder_weights_rejects_a_partial_trunk(tmp_path) -> None:
+    torch.manual_seed(0)
+    supervised = FoodCNN(num_classes=251)
+    state_dict = supervised.state_dict()
+    # A trunk that is missing a tensor the current architecture expects, which
+    # is what a checkpoint from a different FoodCNN generation looks like.
+    dropped = next(k for k in state_dict if k.startswith('features.') and k.endswith('.weight'))
+    del state_dict[dropped]
+    checkpoint_path = tmp_path / 'partial.pth.tar'
+    torch.save({'state_dict': state_dict}, checkpoint_path)
+
+    fresh = FoodCNN(num_classes=251)
+    with pytest.raises(ValueError, match='does not match this FoodCNN'):
+        load_encoder_weights(fresh, str(checkpoint_path))
+
+
 def test_param_groups_cover_every_parameter() -> None:
     model = SimSiamModel(FoodCNN(num_classes=251))
     grouped = {id(p) for group in param_groups(model) for p in group['params']}

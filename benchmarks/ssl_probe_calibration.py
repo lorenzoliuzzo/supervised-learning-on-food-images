@@ -30,12 +30,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from main import (  # noqa: E402
     FoodX251Dataset,
     dataset_paths,
-    eval_resolution,
     load_val_split,
     select_amp_dtype,
 )
 from model import FoodCNN  # noqa: E402
-from simsiam import collapse_metrics, extract_features, knn_accuracy  # noqa: E402
+
+# build_eval_transform is imported rather than reimplemented on purpose: an
+# anchor is only comparable to a probe reading if both saw the identical
+# pipeline, so the two must not be able to drift apart.
+from simsiam import (  # noqa: E402
+    build_eval_transform,
+    collapse_metrics,
+    extract_features,
+    knn_accuracy,
+)
 
 RANDOM_INIT = "random"
 SUPERVISED = "checkpoints/full-90ep-lr0.8-best.pth.tar"
@@ -52,17 +60,12 @@ class Probe:
     frac_nonneg: float
 
 
-def build_eval_transform(normalize: transforms.Normalize, crop_size: int) -> transforms.Compose:
-    resize, crop = eval_resolution(crop_size)
-    return transforms.Compose([
-        transforms.Resize(resize),
-        transforms.CenterCrop(crop),
-        transforms.ToTensor(),
-        normalize,
-    ])
-
-
-def load_encoder(source: str, device: torch.device) -> FoodCNN:
+def load_encoder(source: str, device: torch.device, seed: int = 0) -> FoodCNN:
+    # The random-init anchor is a *sample*, not a constant: unseeded, it moved
+    # 2.80% -> 3.36% kNN and 4.8 -> 4.4 effective rank between two runs of this
+    # script. That is the same order as a real pretrain's first probe interval,
+    # so an unseeded floor can flatter or damn a run by chance. Seed it.
+    torch.manual_seed(seed)
     model = FoodCNN(num_classes=251)
     if source != RANDOM_INIT:
         state = torch.load(source, map_location="cpu", weights_only=False)["state_dict"]
@@ -86,8 +89,9 @@ def load_encoder(source: str, device: torch.device) -> FoodCNN:
 
 
 @torch.no_grad()
-def probe(label: str, source: str, bank_loader, query_loader, device, amp_dtype) -> Probe:
-    encoder = load_encoder(source, device)
+def probe(label: str, source: str, bank_loader, query_loader, device, amp_dtype,
+          seed: int = 0) -> Probe:
+    encoder = load_encoder(source, device, seed)
     bank, bank_labels = extract_features(bank_loader, encoder, device, amp_dtype)
     query, query_labels = extract_features(query_loader, encoder, device, amp_dtype)
 
@@ -120,16 +124,18 @@ def main() -> None:
                             "loader-bound, so the full 118,475 costs minutes")
     parser.add_argument("--batch-size", default=256, type=int)
     parser.add_argument("--workers", default=4, type=int)
-    parser.add_argument("--crop-size", default=176, type=int)
     parser.add_argument("--val-split", default="splits/val_split.csv")
     parser.add_argument("--val-subset", default="dev", choices=["dev", "test", "all"])
+    parser.add_argument("--seed", default=0, type=int,
+                       help="seeds the random-init anchor, which is otherwise a "
+                            "different encoder on every run (default: 0)")
     args = parser.parse_args()
 
     device = torch.accelerator.current_accelerator()
     amp_dtype = select_amp_dtype(device)
 
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    eval_transform = build_eval_transform(normalize, args.crop_size)
+    eval_transform = build_eval_transform(normalize)
     (train_dir, train_labels), (val_dir, val_labels) = dataset_paths(args.data)
 
     bank_dataset = FoodX251Dataset(train_dir, train_labels, eval_transform)
@@ -152,7 +158,7 @@ def main() -> None:
     sources += [(Path(path).stem, path) for path in args.checkpoints]
 
     results = [
-        probe(label, source, bank_loader, query_loader, device, amp_dtype)
+        probe(label, source, bank_loader, query_loader, device, amp_dtype, args.seed)
         for label, source in sources
     ]
 

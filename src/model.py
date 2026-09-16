@@ -50,23 +50,30 @@ class FoodCNN(nn.Module):
         # budget where it can affect accuracy. Stage widths double as the spatial
         # resolution halves; the final stage carries one block rather than two,
         # which is what keeps the model under 10M.
+        # Map sizes below are given as train@176 / eval@224, the FixRes pair
+        # main.py uses (see eval_resolution there). The trunk downsamples 32x
+        # in total, so the final map is 6x6 when training and 7x7 when
+        # evaluating -- the 6x6 is the number the roadmap's architecture table
+        # compares against the 5-stage variant's 3x3.
         self.features = nn.Sequential(
-            # Stem: 224 -> 112 -> 56 before any residual stage, so the expensive
-            # stages never run at full resolution.
+            # Stem: 176 -> 88 -> 44 (224 -> 112 -> 56) before any residual
+            # stage, so the expensive stages never run at full resolution.
             nn.Conv2d(3, 64, kernel_size=3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
 
-            self._stage(64, 64, blocks=2, stride=1),     # 56x56
-            self._stage(64, 128, blocks=2, stride=2),    # 28x28
-            self._stage(128, 256, blocks=2, stride=2),   # 14x14
-            self._stage(256, 512, blocks=1, stride=2),   # 7x7
+            self._stage(64, 64, blocks=2, stride=1),     # 44x44 / 56x56
+            self._stage(64, 128, blocks=2, stride=2),    # 22x22 / 28x28
+            self._stage(128, 256, blocks=2, stride=2),   # 11x11 / 14x14
+            self._stage(256, 512, blocks=1, stride=2),   #   6x6 /   7x7
         )
 
         # Genuinely global: (1, 1), not (7, 7). At (7, 7) the flatten produced
         # 512*7*7 = 25088 features and the first Linear alone was 6.4M
         # parameters -- 94% of the model, for the least useful layer in it.
+        # Pooling to (1, 1) is also what lets the same weights take 176 and 224
+        # inputs, which the FixRes train/eval pair depends on.
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
 
         self.classifier = nn.Sequential(

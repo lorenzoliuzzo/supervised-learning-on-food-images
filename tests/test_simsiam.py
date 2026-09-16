@@ -5,7 +5,7 @@ from PIL import Image
 from torch.optim.lr_scheduler import LambdaLR
 from torchvision.transforms import Normalize
 
-from main import load_encoder_weights
+from main import eval_resolution, load_encoder_weights
 from model import FoodCNN
 from simsiam import (
     PredictionMLP,
@@ -13,9 +13,11 @@ from simsiam import (
     SimSiamModel,
     TwoCropsTransform,
     UnlabeledImageDataset,
+    build_eval_transform,
     build_ssl_transform,
     collapse_metrics,
     cosine_lr,
+    extract_features,
     knn_accuracy,
     negative_cosine_similarity,
     param_groups,
@@ -239,3 +241,64 @@ def test_predictor_lr_stays_constant_while_trunk_decays() -> None:
     assert trunk_lrs[0] == pytest.approx(0.05)
     assert trunk_lrs[-1] < 1e-3
     assert trunk_lrs == sorted(trunk_lrs, reverse=True)
+
+
+def _feature_loader(num_images: int = 6, batch_size: int = 2) -> torch.utils.data.DataLoader:
+    images = torch.randn(num_images, 3, 176, 176)
+    labels = torch.arange(num_images) % 251
+    return torch.utils.data.DataLoader(
+        torch.utils.data.TensorDataset(images, labels), batch_size=batch_size)
+
+
+def test_extract_features_returns_l2_normalized_rows() -> None:
+    # knn_accuracy takes `chunk @ bank.T` as a cosine similarity, which is only
+    # true if extract_features has already normalized both sides.
+    features, _ = extract_features(
+        _feature_loader(), FoodCNN(num_classes=251), torch.device('cpu'), torch.float32)
+
+    norms = features.norm(dim=1)
+    assert torch.allclose(norms, torch.ones_like(norms), atol=1e-5)
+
+
+def test_extract_features_keeps_labels_aligned_with_the_loader() -> None:
+    loader = _feature_loader(num_images=6, batch_size=2)
+
+    features, labels = extract_features(
+        loader, FoodCNN(num_classes=251), torch.device('cpu'), torch.float32)
+
+    assert features.shape == (6, 512)
+    assert torch.equal(labels, torch.arange(6) % 251)
+
+
+def test_extract_features_restores_train_mode() -> None:
+    # The probe runs between training epochs, so leaving the encoder in eval()
+    # would silently freeze BatchNorm's running stats for the rest of the run.
+    encoder = FoodCNN(num_classes=251)
+    encoder.train()
+
+    extract_features(_feature_loader(), encoder, torch.device('cpu'), torch.float32)
+
+    assert encoder.training
+
+
+def test_extract_features_builds_no_autograd_graph() -> None:
+    # The bank is 25k x 512; retaining graph history over it would hold the
+    # activations of every probe batch at once.
+    features, _ = extract_features(
+        _feature_loader(), FoodCNN(num_classes=251), torch.device('cpu'), torch.float32)
+
+    assert not features.requires_grad
+
+
+def test_build_eval_transform_evaluates_at_the_fixres_resolution() -> None:
+    # Deliberately 224, not the 176 the SSL views are cropped to: FixRes
+    # evaluates higher than it trains, and this pipeline has to match main.py's
+    # validation exactly or a kNN number here is not comparable to the
+    # supervised ones. eval_resolution(176) is (256, 224), the same pair.
+    normalize = Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    image = Image.fromarray(np.zeros((300, 400, 3), dtype=np.uint8))
+
+    tensor = build_eval_transform(normalize)(image)
+
+    assert tensor.shape == (3, 224, 224)
+    assert eval_resolution(176) == (256, 224)

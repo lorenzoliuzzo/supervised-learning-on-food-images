@@ -19,13 +19,16 @@ food251
 # Third-party papers, not ours to redistribute
 articles/
 
-# Training artefacts
+# Training artefacts. No trailing slash, same reason as food251 above: a
+# worktree symlinks these to the main checkout so runs write their logs and
+# weights where every other run's are, and `runs/` would not match a symlink.
 *.pth
 *.pth.tar
-runs/
-checkpoints/
+runs
+checkpoints
 
 # Deterministic from food251/meta/val_labels.csv + a fixed seed (see
 # src/make_val_split.py) -- regenerate locally rather than committing a
-# 12k-row CSV that's fully reproducible from a one-line command.
-splits/
+# 12k-row CSV that's fully reproducible from a one-line command. Also holds
+# pseudo_labels.csv, which is reproducible from a teacher checkpoint.
+splits

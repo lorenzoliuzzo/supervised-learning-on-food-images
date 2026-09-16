@@ -556,13 +556,13 @@ recipe are both decided.
       not an exactly reproducible one.
 - [ ] Optional, cheap to measure: `torch.compile`.
 
-## Phase E — self-supervised track (~50 GPU-h at measured throughput)
+## Phase E — self-supervised track (5.7 GPU-h spent, ~2 planned)
 
 > **Superseded 2026-09-15 by what actually ran — see "Measured" below.** The
 > 200-epoch decision was costed at ~8 h from an estimate. Measured, a pretrain
 > epoch on 146,852 images costs 407–492 s across the two runs, so 200 epochs is
-> **~23–27 h**, not 8, and Phase E as specified is ~50 GPU-h rather than 18. The paragraph below is
-> kept because the SimSiam-over-BYOL reasoning still holds.
+> **~23–27 h**, not 8, and Phase E as specified is ~50 GPU-h rather than 18. The
+> paragraph below is kept because the SimSiam-over-BYOL reasoning still holds.
 
 **Decided: the full setting — 200 pretrain epochs at 176 px.** SimSiam/BYOL needs
 two augmented views per step, so an epoch costs ~2x. This phase was budgeted at
@@ -571,8 +571,8 @@ the pretrain epoch and **the pretrain half of that estimate is low by 3–3.4x**
 intent stands — more GPU time than the entire rest of the plan combined, spent
 deliberately to keep the result comparable to the published SimSiam/BYOL settings
 instead of inviting "you under-trained it" — but at ~23–27 h for the pretrain
-alone the scope is worth re-taking as a decision rather than carried as an
-assumption (see Decisions taken).
+alone that intent was not affordable, and the scope was retaken rather than
+carried as an assumption (see Decisions taken).
 
 **SimSiam over BYOL, decided 2026-08-03**: no momentum/target encoder to add
 (no second ~6.5M-param shadow copy of `FoodCNN` sitting in VRAM), no EMA-decay

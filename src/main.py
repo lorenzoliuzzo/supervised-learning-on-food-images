@@ -92,6 +92,14 @@ parser.add_argument('--init-encoder', default='', type=str, metavar='PATH',
                          'classifier stays randomly initialized. Mutually exclusive '
                          'with --resume: this starts a new supervised run from '
                          'pretrained weights, --resume continues an existing one.')
+parser.add_argument('--pseudo-labels', default='', type=str, metavar='PATH',
+                    help='CSV of image_name,label,confidence over test_set, from '
+                         'benchmarks/make_pseudo_labels.py. Rows at or above '
+                         '--pseudo-label-min-confidence join train_set for this run.')
+parser.add_argument('--pseudo-label-min-confidence', default=0.9, type=float, metavar='P',
+                    help='confidence floor for --pseudo-labels rows (default: 0.9). '
+                         'Trades pseudo-label precision against how many of the '
+                         '28,377 unlabeled images are usable at all.')
 parser.add_argument('--augment', default='none', choices=['none', 'trivial', 'rand'],
                     help='extra train-time augmentation policy on top of crop+flip '
                          '(default: none)')
@@ -177,6 +185,32 @@ def dataset_paths(
     train = (root / 'train_set', root / 'meta' / 'train_labels.csv')
     val = (root / 'val_set', root / 'meta' / 'val_labels.csv')
     return train, val
+
+
+def load_pseudo_label_subset(
+    path: str | pathlib.Path, min_confidence: float
+) -> set[str]:
+    # Kept separate from FoodX251Dataset's own CSV read so the confidence
+    # column stays out of the dataset class: the file is written once per
+    # teacher and thresholded per run, so the survivors are a property of this
+    # run, not of the file.
+    csv_path = pathlib.Path(path)
+    if not csv_path.is_file():
+        raise FileNotFoundError(
+            f"no pseudo-label CSV at '{csv_path}' -- generate one with "
+            "benchmarks/make_pseudo_labels.py <teacher-checkpoint>"
+        )
+    df = pd.read_csv(csv_path)
+    missing = {'image_name', 'label', 'confidence'} - set(df.columns)
+    if missing:
+        raise ValueError(f"'{csv_path}' is missing column(s) {sorted(missing)}")
+    kept = df[df['confidence'] >= min_confidence]
+    if kept.empty:
+        raise ValueError(
+            f"no pseudo-label in '{csv_path}' reaches confidence "
+            f"{min_confidence} (max is {df['confidence'].max():.4f})"
+        )
+    return set(kept['image_name'])
 
 
 def eval_resolution(crop_size: int) -> tuple[int, int]:
@@ -580,11 +614,27 @@ def main_worker(gpu, ngpus_per_node, args):
 
     (train_dir, train_labels), (val_dir, val_labels) = dataset_paths(args.data)
 
-    train_dataset = FoodX251Dataset(
-        train_dir,
-        train_labels,
-        build_train_transform(args.augment, normalize, args.crop_scale_min, args.crop_size)
-    )
+    train_transform = build_train_transform(
+        args.augment, normalize, args.crop_scale_min, args.crop_size)
+    train_dataset = FoodX251Dataset(train_dir, train_labels, train_transform)
+
+    if args.pseudo_labels:
+        # The pseudo-labeled images get the same augmentation as the real ones.
+        # Weakening it for them would confound "does self-training help" with
+        # "does this subset see an easier pipeline".
+        subset = load_pseudo_label_subset(
+            args.pseudo_labels, args.pseudo_label_min_confidence)
+        pseudo_dataset = FoodX251Dataset(
+            pathlib.Path(args.data) / 'test_set',
+            args.pseudo_labels,
+            train_transform,
+            subset=subset,
+        )
+        pool_size = len(pd.read_csv(args.pseudo_labels))
+        print(f"=> pseudo-labels: {len(pseudo_dataset)} of {pool_size} test_set images "
+              f"at confidence >= {args.pseudo_label_min_confidence} "
+              f"({100.0 * len(pseudo_dataset) / len(train_dataset):.1f}% of train_set)")
+        train_dataset = torch.utils.data.ConcatDataset([train_dataset, pseudo_dataset])
 
     val_resize, val_crop = eval_resolution(args.crop_size)
     val_subset = load_val_split(args.val_split, args.val_subset)
@@ -619,7 +669,13 @@ def main_worker(gpu, ngpus_per_node, args):
         validate(val_loader, model, criterion, args, amp_dtype)
         return
 
-    run_config = vars(args) | {'val_subset_size': len(val_dataset)}
+    run_config = vars(args) | {
+        'val_subset_size': len(val_dataset),
+        # With --pseudo-labels this is train_set plus the surviving rows, which
+        # the threshold alone doesn't pin down -- the CSV can be regenerated
+        # from a different teacher.
+        'train_set_size': len(train_dataset),
+    }
     run = (RunLog.restore(args.run_label, run_config, resumed_checkpoint)
            if resumed_checkpoint is not None
            else RunLog(label=args.run_label, config=run_config))

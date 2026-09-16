@@ -12,9 +12,77 @@ from main import (
     dataset_paths,
     eval_resolution,
     load_class_names,
+    load_pseudo_label_subset,
     load_similarity_pairs,
     load_val_split,
 )
+
+
+def _write_pseudo_labels(path: pathlib.Path, rows: list[tuple[str, int, float]]) -> None:
+    pd.DataFrame(rows, columns=['image_name', 'label', 'confidence']).to_csv(
+        path, index=False
+    )
+
+
+def test_pseudo_label_subset_keeps_only_confident_rows(tmp_path: pathlib.Path) -> None:
+    csv_path = tmp_path / 'pseudo.csv'
+    _write_pseudo_labels(csv_path, [
+        ('test_000000.jpg', 3, 0.99),
+        ('test_000001.jpg', 7, 0.90),
+        ('test_000002.jpg', 11, 0.89),
+    ])
+
+    # The floor is inclusive, so the 0.90 row survives and the 0.89 one does not.
+    assert load_pseudo_label_subset(csv_path, 0.9) == {
+        'test_000000.jpg', 'test_000001.jpg'
+    }
+    assert load_pseudo_label_subset(csv_path, 0.0) == {
+        'test_000000.jpg', 'test_000001.jpg', 'test_000002.jpg'
+    }
+
+
+def test_pseudo_label_subset_fails_loudly_when_absent(tmp_path: pathlib.Path) -> None:
+    with pytest.raises(FileNotFoundError, match='make_pseudo_labels'):
+        load_pseudo_label_subset(tmp_path / 'does_not_exist.csv', 0.9)
+
+
+def test_pseudo_label_subset_rejects_a_csv_without_confidence(tmp_path: pathlib.Path) -> None:
+    csv_path = tmp_path / 'no_confidence.csv'
+    pd.DataFrame({'image_name': ['a.jpg'], 'label': [1]}).to_csv(csv_path, index=False)
+
+    with pytest.raises(ValueError, match='confidence'):
+        load_pseudo_label_subset(csv_path, 0.9)
+
+
+def test_pseudo_label_subset_rejects_a_threshold_nothing_reaches(tmp_path: pathlib.Path) -> None:
+    csv_path = tmp_path / 'pseudo.csv'
+    _write_pseudo_labels(csv_path, [('test_000000.jpg', 3, 0.42)])
+
+    # Silently training on train_set alone here would make a --pseudo-labels
+    # run indistinguishable from a control in its own log.
+    with pytest.raises(ValueError, match='0.4200'):
+        load_pseudo_label_subset(csv_path, 0.9)
+
+
+def test_dataset_reads_pseudo_labels_from_the_second_column(tmp_path: pathlib.Path) -> None:
+    # FoodX251Dataset takes label from iloc[:, 1], which the third confidence
+    # column must not disturb -- this is what lets the pseudo-label CSV be fed
+    # to the same dataset class as meta/train_labels.csv.
+    image_dir = tmp_path / 'test_set'
+    image_dir.mkdir()
+    for name in ('test_000000.jpg', 'test_000001.jpg'):
+        Image.new('RGB', (8, 8)).save(image_dir / name)
+    csv_path = tmp_path / 'pseudo.csv'
+    _write_pseudo_labels(csv_path, [
+        ('test_000000.jpg', 137, 0.97),
+        ('test_000001.jpg', 5, 0.10),
+    ])
+
+    subset = load_pseudo_label_subset(csv_path, 0.9)
+    dataset = FoodX251Dataset(image_dir, csv_path, subset=subset)
+
+    assert len(dataset) == 1
+    assert dataset.labels == [137]
 
 
 def test_eval_resolution_default_reproduces_the_measured_pipeline() -> None:

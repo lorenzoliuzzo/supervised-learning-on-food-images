@@ -695,10 +695,26 @@ twice**, so there is no run-to-run variance estimate to lean on.
 - [ ] Paired McNemar's for each against the matched Phase D checkpoint.
 - [ ] Only if that clears: resume `gate-50ep` (`--resume`, history is carried
       in the checkpoint) or pretrain longer. It was still gaining when stopped.
-- [ ] **The longer supervised control.** The 90-epoch run never converged —
-      val rose 61.47% → 64.36% over its final nine epochs with no overfitting
-      signal — so "spend the GPU-hours on more supervised epochs" is a live
-      contender, not a formality. See §Phase D.
+- [ ] **A longer supervised schedule** — not "more epochs". This plan used to
+      claim the 90-epoch run "never converged" because val rose 61.47% → 64.36%
+      over its final nine epochs. **Re-measured 2026-09-16, that reading was
+      wrong**: the rise is the end-of-cosine convergence jump, and it was
+      obtained by fitting across an LR anneal (0.052 → 0.0003) from a local dip
+      at epoch 80 to the global peak at 86. Over the last 8 epochs the slope is
+      +0.131 pts/epoch against a std of 0.38 — flat within noise — while
+      `train_loss` keeps falling 2.55 → 2.23. On uncleaned web data that
+      divergence is noise-fitting, not underfitting. More epochs on the *same*
+      cosine therefore buy nothing; the LR is already ~0. A longer schedule
+      (120 or 150-epoch cosine) is a real and untested experiment, but it needs
+      its own justification rather than this one.
+- [ ] **Self-training on `test_set`, ~2 h** — the cheapest use of both the
+      trained CNN and the 28,377 unlabeled images, and the only path that feeds
+      the 63.83% checkpoint back in at all. Generate with
+      `benchmarks/make_pseudo_labels.py`, train with `main.py --pseudo-labels`.
+      Its threshold sweep decides whether to run the training half: what
+      matters is the survivor count at a usable confidence floor, since
+      `test_set` is only **+24%** on top of `train_set` and self-training
+      propagates the teacher's knowledge rather than adding any.
 
 **Where to run it**: `notebooks/colab_gpu_probe.ipynb` benchmarks
 `FoodCNN` on whatever GPU Colab assigns that session, using

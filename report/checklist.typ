@@ -1,6 +1,5 @@
 #let url(uri) = link(uri, raw(uri))
 
-#let TODO = text(fill: red, [*[TODO]*])
 #let answerNA = text(fill: gray, "[NA]")
 #let answerNo = text(fill: rgb("ff8c00"), "[No]")
 #let answerYes = text(fill: blue, "[Yes]")
@@ -11,59 +10,7 @@
 
 = NeurIPS Paper Checklist
 
-// BEGIN INSTRUCTIONS
 
-The checklist is designed to encourage best practices for responsible machine
-learning research, addressing issues of reproducibility, transparency, research
-ethics, and societal impact. Do not remove the checklist: *The papers not
-including the checklist will be desk rejected.* The checklist should follow the
-references and follow the (optional) supplemental material. The checklist does
-NOT count towards the page limit.
-
-Please read the checklist guidelines carefully for information on how to answer
-these questions. For each question in the checklist:
-
-- You should answer #answerYes, #answerNo, or #answerNA.
-- #answerNA means either that the question is Not Applicable for that
-  particular paper or the relevant information is Not Available.
-- Please provide a short (1–2 sentence) justification right after your answer
-  (even for NA).
-
-*The checklist answers are an integral part of your paper submission.* They are
-visible to the reviewers, area chairs, senior area chairs, and ethics
-reviewers. You will also be asked to include it (after eventual revisions) with
-the final version of your paper, and its final version will be published with
-the paper.
-
-The reviewers of your paper will be asked to use the checklist as one of the
-factors in their evaluation. While "#answerYes" is generally preferable to
-"#answerNo", it is perfectly acceptable to answer "#answerNo" provided a
-proper justification is given (e.g., "error bars are not reported because it
-would be too computationally expensive" or "we were unable to find the license
-for the dataset we used"). In general, answering "#answerNo" or "#answerNA"
-is not grounds for rejection. While the questions are phrased in a binary way,
-we acknowledge that the true answer is often more nuanced, so please just use
-your best judgment and write a justification to elaborate. All supporting
-evidence can appear either in the main paper or the supplemental material,
-provided in appendix. If you answer #answerYes to a question, in the
-justification please point to the section(s) where related material for the
-question can be found.
-
-IMPORTANT, please:
-
-#block({
-  set list(indent: 1em)
-  [
-  - *Delete this instruction block, but keep the section heading "NeurIPS Paper
-    Checklist".*
-  - *Keep the checklist subsection headings, questions/answers and guidelines
-    below.*
-  - *Do not modify the questions and only use the provided macros for your
-    answers.*
-  ]
-})
-
-// END INSTRUCTIONS
 
 #let claim(
   name: [], question: [], answer: [], justification: [], guidelines: [],
@@ -91,8 +38,15 @@ IMPORTANT, please:
   question: [
     Do the main claims made in the abstract and introduction accurately reflect
     the paper's contributions and scope?],
-  answer: TODO,  // Replace by answerYes, answerNo, or answerNA.
-  justification: TODO,
+  answer: answerYes,
+  justification: [The abstract and @introduction state the headline 63.83%
+    top-1 / 87.39% top-5 on `val-test`, the parameter budget actually used
+    (6.58M of 10M), and the two findings the paper rests on -- that capacity
+    does not bind (@table-width-floor) and that the model underfits, so no
+    regularizer helped (@table-recipe-ablation). The self-supervised
+    comparison named in the title is explicitly marked as designed but unrun,
+    in the abstract, @introduction and @sec-ssl alike, and no numbers are
+    claimed for it.],
   guidelines: [
   - The answer NA means that the abstract and introduction do not include the
     claims made in the paper.
@@ -115,8 +69,13 @@ IMPORTANT, please:
     Does the paper discuss the limitations of the work performed by the
     authors?
   ],
-  answer: TODO,  // Replace by answerYes, answerNo, or answerNA.
-  justification: TODO,
+  answer: answerYes,
+  justification: [@discussion has a dedicated Limitations paragraph. It
+    states that no run was seeded, which comparisons that most affects, that
+    all measurements come from one machine and need not transfer, that
+    from-scratch accuracies are not comparable to pretrained baselines, and
+    that GCE and EMA were each evaluated at a learning rate tuned for a
+    different loss and so are unproven rather than ruled out.],
   guidelines: [
     - The answer NA means that the paper has no limitation while the answer No
       means that the paper has limitations, but those are not discussed in the
@@ -165,8 +124,8 @@ IMPORTANT, please:
     For each theoretical result, does the paper provide the full set of
     assumptions and a complete (and correct) proof?
   ],
-  answer: TODO,  // Replace by answerYes, answerNo, or answerNA.
-  justification: TODO,
+  answer: answerNA,
+  justification: [The paper contains no theoretical results.],
   guidelines: [
     - The answer NA means that the paper does not include theoretical results.
 
@@ -196,8 +155,16 @@ IMPORTANT, please:
     main claims and/or conclusions of the paper (regardless of whether the code
     and data are provided or not)?
   ],
-  answer: TODO,  // Replace by answerYes, answerNo, or answerNA.
-  justification: TODO,
+  answer: answerYes,
+  justification: [@method gives the architecture in full, @sec-recipe-ablation
+    and @appendix-lr give every hyperparameter and how it was chosen, and
+    @dataset-protocol specifies the split protocol, including that
+    `src/make_val_split.py` regenerates a byte-identical `val-dev`/`val-test`
+    split from the official labels and a fixed seed (251). The exact command
+    behind the headline run is recorded with the run log. One caveat is stated
+    rather than hidden: training runs were not seeded (@dataset-protocol), so
+    a rerun reproduces the setup and the conclusions but not the exact
+    digits.],
   guidelines: [
     - The answer NA means that the paper does not include experiments.
 
@@ -250,8 +217,12 @@ IMPORTANT, please:
     instructions to faithfully reproduce the main experimental results, as
     described in supplemental material?
   ],
-  answer: TODO,  // Replace by answerYes, answerNo, or answerNA.
-  justification: TODO,
+  answer: answerYes,
+  justification: [FoodX-251 @kaur2019foodx is a public benchmark obtained from
+    its official release; it is not redistributed here. All training,
+    benchmarking and analysis code is in the accompanying repository, and the
+    validation split is regenerated by a script rather than shipped as data,
+    so it cannot silently drift from the one used here.],
   guidelines: [
     - The answer NA means that paper does not include experiments requiring
       code.
@@ -294,8 +265,13 @@ IMPORTANT, please:
     splits, hyperparameters, how they were chosen, type of optimizer)
     necessary to understand the results?
   ],
-  answer: TODO,  // Replace by answerYes, answerNo, or answerNA.
-  justification: TODO,
+  answer: answerYes,
+  justification: [@method gives the optimizer (SGD with Nesterov momentum),
+    schedule (cosine with five-epoch linear warmup), loss, precision policy,
+    crop sizes and worker count; @sec-recipe-ablation gives the learning rate
+    and batch size with the sweeps that chose them; @dataset-protocol gives
+    the splits and the 15-epoch proxy protocol. @appendix-lr and
+    @appendix-nonlevers give the sweeps in full.],
   guidelines: [
     - The answer NA means that the paper does not include experiments.
 
@@ -314,8 +290,19 @@ IMPORTANT, please:
     appropriate information about the statistical significance of the
     experiments?
   ],
-  answer: TODO,  // Replace by answerYes, answerNo, or answerNA.
-  justification: TODO,
+  answer: answerYes,
+  justification: [Every close comparison is accompanied by a paired McNemar
+    exact test on the same `val-dev` images
+    (`benchmarks/significance_test.py`), reported as an exact $p$ in
+    @table-width-floor, @table-recipe-ablation, @table-batch-size and
+    @table-crop-scale. That test is what keeps two results honest: the
+    64-384 trunk's tie with the baseline ($p = 1.0$) and RandAugment's
+    0.84-point deficit, which is *not* significant ($p = 0.075$) and is
+    reported as unproven rather than a win. We do *not* report error bars over
+    random seeds, because no run was seeded; @dataset-protocol and
+    @discussion both state this and name it as the first thing that should be
+    added, and are explicit that McNemar covers sampling variance over images
+    only, not training variance.],
   guidelines: [
     - The answer NA means that the paper does not include experiments.
 
@@ -356,8 +343,18 @@ IMPORTANT, please:
     computer resources (type of compute workers, memory, time of execution)
     needed to reproduce the experiments?
   ],
-  answer: TODO,  // Replace by answerYes, answerNo, or answerNA.
-  justification: TODO,
+  answer: answerYes,
+  justification: [All runs used one RTX 5050 Laptop GPU (8GB VRAM) in its
+    `performance` power profile, stated in @experiments. Per-run wall-clock
+    and peak VRAM are logged for every run (`src/runlog.py`) and quoted in
+    the text: about 18-27 minutes per 15-epoch proxy, 2h05m and 1.99 GiB peak
+    for the 90-epoch headline run. The runs behind the reported results total
+    roughly 7 GPU-hours. The project spent appreciably more than that, and the
+    paper says so rather than only counting what worked: the synthetic
+    screening sweep of @appendix-sweep, a separate 90-epoch
+    pipeline-validation run (@sec-full-run), the two 30-epoch legs of the
+    matched rematch, and one proxy leg lost to a shared-memory crash and
+    re-run (@appendix-nonlevers) are all additional.],
   guidelines: [
     - The answer NA means that the paper does not include experiments.
 
@@ -380,8 +377,11 @@ IMPORTANT, please:
     the NeurIPS Code of Ethics
     #url("https://neurips.cc/public/EthicsGuidelines")?
   ],
-  answer: TODO,  // Replace by answerYes, answerNo, or answerNA.
-  justification: TODO,
+  answer: answerYes,
+  justification: [The work uses a public benchmark under its terms, releases
+    its code, involves no human subjects or personally identifying data, and
+    discloses its negative results and its methodological gaps rather than
+    reporting only what worked.],
   guidelines: [
     - The answer NA means that the authors have not reviewed the NeurIPS Code
       of Ethics.
@@ -399,8 +399,11 @@ IMPORTANT, please:
     Does the paper discuss both potential positive societal impacts and
     negative societal impacts of the work performed?
   ],
-  answer: TODO,  // Replace by answerYes, answerNo, or answerNA.
-  justification: TODO,
+  answer: answerNA,
+  justification: [The work trains a small image classifier on a public food
+    benchmark, entirely from scratch, and releases no model or data that
+    carries foreseeable societal risk beyond that of image classification
+    generally.],
   guidelines: [
     - The answer NA means that there is no societal impact of the work
       performed.
@@ -443,8 +446,10 @@ IMPORTANT, please:
     responsible release of data or models that have a high risk for misuse
     (e.g., pre-trained language models, image generators, or scraped datasets)?
   ],
-  answer: TODO,  // Replace by answerYes, answerNo, or answerNA.
-  justification: TODO,
+  answer: answerNA,
+  justification: [No data or model with a high risk of misuse is released. The
+    trained classifier predicts one of 251 food categories and has no
+    generative capability.],
   guidelines: [
     - The answer NA means that the paper poses no such risks.
 
@@ -469,8 +474,14 @@ IMPORTANT, please:
     used in the paper, properly credited and are the license and terms of use
     explicitly mentioned and properly respected?
   ],
-  answer: TODO,  // Replace by answerYes, answerNo, or answerNA.
-  justification: TODO,
+  answer: answerYes,
+  justification: [FoodX-251 is credited to @kaur2019foodx and used under its
+    published terms. `src/main.py` is adapted from the PyTorch ImageNet
+    reference training script and says so in the repository, keeping that
+    script's structure deliberately; `src/resnet.py` is kept unmodified as a
+    baseline for comparison. PyTorch and torchvision are used as ordinary
+    dependencies under their own licenses. Every technique tested in
+    @sec-recipe-ablation is cited to its originating paper.],
   guidelines: [
     - The answer NA means that the paper does not use existing assets.
 
@@ -505,8 +516,10 @@ IMPORTANT, please:
     Are new assets introduced in the paper well documented and is the
     documentation provided alongside the assets?
   ],
-  answer: TODO,  // Replace by answerYes, answerNo, or answerNA.
-  justification: TODO,
+  answer: answerNA,
+  justification: [No new dataset or pretrained model is released. The
+    accompanying code is documented in the repository, but it is an
+    implementation of the paper rather than an asset offered for reuse.],
   guidelines: [
     - The answer NA means that the paper does not release new assets.
 
@@ -528,8 +541,10 @@ IMPORTANT, please:
     paper include the full text of instructions given to participants and
     screenshots, if applicable, as well as details about compensation (if any)?
   ],
-  answer: TODO,  // Replace by answerYes, answerNo, or answerNA.
-  justification: TODO,
+  answer: answerNA,
+  justification: [The paper involves no crowdsourcing and no human subjects.
+    FoodX-251's validation labels were human-verified by its original authors,
+    not by us.],
   guidelines: [
     - The answer NA means that the paper does not involve crowdsourcing nor
       research with human subjects.
@@ -555,8 +570,8 @@ IMPORTANT, please:
     approval/review based on the requirements of your country or institution)
     were obtained?
   ],
-  answer: TODO,  // Replace by answerYes, answerNo, or answerNA.
-  justification: TODO,
+  answer: answerNA,
+  justification: [The paper involves no research with human subjects.],
   guidelines: [
     - The answer NA means that the paper does not involve crowdsourcing nor
       research with human subjects.
@@ -583,8 +598,12 @@ IMPORTANT, please:
     does _not_ impact the core methodology, scientific rigor, or originality of
     the research, declaration is not required.
   ],
-  answer: TODO,  // Replace by answerYes, answerNo, or answerNA.
-  justification: TODO,
+  answer: answerNA,
+  justification: [No LLM is a component of the method. The classifier, the
+    training pipeline and every experiment reported here are ordinary
+    supervised computer vision, and no result depends on an LLM. LLM
+    assistance was used for writing and for routine software engineering,
+    which the policy above does not require declaring.],
   guidelines: [
     - The answer NA means that the core method development in this research
       does not involve LLMs as any important, original, or non-standard

@@ -707,14 +707,42 @@ twice**, so there is no run-to-run variance estimate to lean on.
       cosine therefore buy nothing; the LR is already ~0. A longer schedule
       (120 or 150-epoch cosine) is a real and untested experiment, but it needs
       its own justification rather than this one.
-- [ ] **Self-training on `test_set`, ~2 h** — the cheapest use of both the
-      trained CNN and the 28,377 unlabeled images, and the only path that feeds
-      the 63.83% checkpoint back in at all. Generate with
-      `benchmarks/make_pseudo_labels.py`, train with `main.py --pseudo-labels`.
-      Its threshold sweep decides whether to run the training half: what
-      matters is the survivor count at a usable confidence floor, since
-      `test_set` is only **+24%** on top of `train_set` and self-training
-      propagates the teacher's knowledge rather than adding any.
+- [x] **Pseudo-labeled `test_set` with the 63.83% teacher**, measured
+      2026-09-16 — `benchmarks/make_pseudo_labels.py`, 28,377 images,
+      `splits/pseudo_labels.csv`. This is the only path that feeds the
+      supervised checkpoint back into Phase E at all. Teacher scored 64.32% on
+      val-dev in the same pass, matching its logged 64.36%.
+
+      | floor | kept | % of pool | % of train_set | val-dev precision | classes |
+      | --- | --- | --- | --- | --- | --- |
+      | 0.00 | 28,377 | 100% | 24.0% | 64.32% | 251 |
+      | 0.50 | 14,178 | 50.0% | 12.0% | 86.23% | 251 |
+      | 0.70 | 9,546 | 33.6% | 8.1% | 93.14% | 249 |
+      | 0.80 | 7,264 | 25.6% | 6.1% | 94.97% | 246 |
+      | 0.90 | 4,631 | 16.3% | 3.9% | 97.07% | 235 |
+      | 0.95 | 2,894 | 10.2% | 2.4% | 98.31% | 219 |
+      | 0.99 | 830 | 2.9% | 0.7% | 99.32% | 157 |
+
+      Precision is measured on val-dev, which the teacher was selected on, so
+      read it as an optimistic bound rather than an estimate.
+
+      **The usable floor is ~0.70, not the 0.90 default.** Two reasons the
+      normal instinct to go high is wrong here. Volume: 0.90 keeps 4,631
+      images, **3.9%** on top of train_set, too little to expect a measurable
+      move at 63.83%. And coverage collapses as the floor rises — 0.99 keeps
+      only 157 of 251 classes, so a high floor does not merely shrink the
+      addition, it skews it toward the classes already easiest, which is the
+      opposite of where the headroom is. At 0.70 it is 8.1% more data, 249/251
+      classes, at ~6.9% label error — **cleaner than train_set's own web
+      labels**, which is the real argument for self-training on this dataset
+      (see the label-noise note in §Phase D).
+- [ ] **Train it: `main.py --pseudo-labels splits/pseudo_labels.csv
+      --pseudo-label-min-confidence 0.7`**, against the 90-epoch from-scratch
+      run as the matched control, with paired McNemar's on val-dev. ~1.8 h.
+      Expect a small effect: +8.1% data cannot do much, and self-training
+      propagates the teacher's knowledge rather than adding any. Worth running
+      because it is cheap and it is the only experiment here that uses both
+      halves of the project.
 
 **Where to run it**: `notebooks/colab_gpu_probe.ipynb` benchmarks
 `FoodCNN` on whatever GPU Colab assigns that session, using

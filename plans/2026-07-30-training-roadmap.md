@@ -1,6 +1,6 @@
 # Training roadmap
 
-**Status:** Phases A-D done, including the addendum and the single 90-epoch full run — **63.83% val-test top-1 / 81.79% top-3 / 87.39% top-5**, the report's headline number (`checkpoints/full-90ep-lr0.8-best.pth.tar`, epoch 86); baseline trunk, GAP head, plain recipe, lr=0.8, batch 256, crop-scale-min 0.08, all unmodified from what this phase settled on. Everything under baseline (narrower trunks, alternate pooling heads, batch size 160/256/512, crop-scale 0.25/0.40, six regularization axes total) was proxied and none beat it. **No run has ever been seeded (#33)**, including this one — every accuracy figure in this file is a point estimate, not an exactly reproducible one. Phase E (self-supervised track) and the report remain; Phase E's SimSiam scaffolding (`src/simsiam.py`, `main.py --init-encoder`, `notebooks/colab_gpu_probe.ipynb`) landed 2026-08-03, no pretraining run has happened yet · **Baseline `main`:** `820f347` · **Last measured:** 2026-08-03
+**Status:** Phases A-D done, including the addendum and the single 90-epoch full run — **63.83% val-test top-1 / 81.79% top-3 / 87.39% top-5**, the report's headline number (`checkpoints/full-90ep-lr0.8-best.pth.tar`, epoch 86); baseline trunk, GAP head, plain recipe, lr=0.8, batch 256, crop-scale-min 0.08, all unmodified from what this phase settled on. Everything under baseline (narrower trunks, alternate pooling heads, batch size 160/256/512, crop-scale 0.25/0.40, six regularization axes total) was proxied and none beat it. **No run has ever been seeded (#33)**, including this one — every accuracy figure in this file is a point estimate, not an exactly reproducible one. Phase E is under way and the report remains. Two SimSiam pretrains have now run: a 20-epoch gate (2026-08-04) and a 50-epoch gate stopped by choice at epoch 30 (2026-09-15, 4.24 h, `checkpoints/gate-50ep.pth.tar`). The second reached **10.42% val-dev kNN top-1 against a 2.80% random-init floor** (61.16% for the supervised checkpoint), was still gaining ~1.3 pp per 5-epoch probe when stopped, and beat the first by **+1.73 pp at matched epoch 19**. The 200-epoch plan below is superseded — see §Phase E. Phase D's 15-epoch LR sweep turns out to be a ready-made matched control for the finetune, so the open question costs ~2 h rather than ~23–27 h. **Pseudo-labeling has now been run and settled negative** (2026-09-16, 2.59 h): +0.27 on held-out val-test at p=0.61, where the val-dev figure it was selected on read +0.86 — see §Phase E · **Baseline `main`:** `820f347` · **Last measured:** 2026-09-16
 
 Every number here was measured on the project box (RTX 5050 Laptop, 8 GB VRAM,
 16 threads) at 176 px / bf16 / `channels_last`, in `performance` power profile,
@@ -556,13 +556,23 @@ recipe are both decided.
       not an exactly reproducible one.
 - [ ] Optional, cheap to measure: `torch.compile`.
 
-## Phase E — self-supervised track (~18 GPU-h)
+## Phase E — self-supervised track (8.3 GPU-h spent, ~2 planned)
+
+> **Superseded 2026-09-15 by what actually ran — see "Measured" below.** The
+> 200-epoch decision was costed at ~8 h from an estimate. Measured, a pretrain
+> epoch on 146,852 images costs 407–492 s across the two runs, so 200 epochs is
+> **~23–27 h**, not 8, and Phase E as specified is ~50 GPU-h rather than 18. The
+> paragraph below is kept because the SimSiam-over-BYOL reasoning still holds.
 
 **Decided: the full setting — 200 pretrain epochs at 176 px.** SimSiam/BYOL needs
-two augmented views per step, so an epoch costs ~2x: ~8 h pretrain, ~1.8 h
-finetune, ~8 h for the control. This is more GPU time than the entire rest of the
-plan combined, and it is deliberate — it keeps the result comparable to the
-published SimSiam/BYOL settings instead of inviting "you under-trained it".
+two augmented views per step, so an epoch costs ~2x. This phase was budgeted at
+~8 h pretrain, ~1.8 h finetune, ~8 h for the control; the gate run below measured
+the pretrain epoch and **the pretrain half of that estimate is low by 3–3.4x**. The
+intent stands — more GPU time than the entire rest of the plan combined, spent
+deliberately to keep the result comparable to the published SimSiam/BYOL settings
+instead of inviting "you under-trained it" — but at ~23–27 h for the pretrain
+alone that intent was not affordable, and the scope was retaken rather than
+carried as an assumption (see Decisions taken).
 
 **SimSiam over BYOL, decided 2026-08-03**: no momentum/target encoder to add
 (no second ~6.5M-param shadow copy of `FoodCNN` sitting in VRAM), no EMA-decay
@@ -578,14 +588,194 @@ checkpointed every epoch and resumable via `--resume`, same pattern as
 by `tests/test_simsiam.py`, all on random tensors per this project's
 no-dataset-in-tests rule.
 
-- [ ] Pretrain 200 epochs at 176 px, then finetune at 176.
+- [x] Pretrain at 176 px — two runs done, see "Measured". 200 epochs not
+      attempted; superseded by the finetune-first plan below.
+- [ ] Finetune at 176 from `checkpoints/gate-50ep.pth.tar`.
 - [ ] **The control is not optional**: SSL-pretrain + finetune must be compared
       against spending those same GPU-hours on longer supervised training.
-      Without it the result is uninterpretable.
+      Without it the result is uninterpretable. *Partly solved for free — see
+      "The control already exists".*
 - [x] Checkpoint pretraining often enough that an interrupted 8 h run is
       resumable — at this length that is a practical requirement, not a nicety.
+      Confirmed in practice: the first gate run died at epoch 7 on `/dev/shm`
+      exhaustion and resumed without loss, the per-epoch checkpoint and
+      `RunLog.restore` carrying the probe history across the restart into a
+      single log. The cause was not the pretrain itself: the kNN probe opened a
+      second `args.workers`-sized loader pool while `train_loader`'s persistent
+      workers were still resident, and 24 workers' shared-memory segments
+      exceed the 7.7 GiB `/dev/shm` on this box. Probe loaders are now capped
+      at `min(args.workers, 4)` (`src/simsiam.py`). Second time `/dev/shm`
+      rather than VRAM has been the binding limit here.
 
 SimCLR is excluded — it degrades below ~1k batch, unreachable in 8 GB.
+
+### Measured
+
+Two pretrains, both on `train+test` (118,475 labelled + 28,377 unlabelled =
+146,852 images), batch 256, lr 0.05, proj 2048 / pred 512, probes every 5
+epochs against a fixed 25k-image kNN bank with val-dev as queries.
+
+| run | predictor LR | epochs | wall | final kNN | final rank |
+| --- | --- | --- | --- | --- | --- |
+| `gate-20ep` | cosine-decayed | 20 | 1.36 h | 5.66% | 16.26 |
+| `gate-50ep` | **constant (Chen & He §4.2)** | 31 of 50, stopped by choice | 4.24 h | **10.42%** | 19.4 |
+
+`gate-50ep` probe trace (val-dev kNN top-1): 3.88 → 4.77 → 6.23 → 7.39 → 8.84
+→ 10.11% at epochs 4/9/14/19/24/29, then 10.42% measured on the epoch-30
+checkpoint. Deltas +0.89, +1.47, +1.15, +1.45, +1.27 — **linear at ~0.25
+pp/epoch with no deceleration over six probes**, so it was stopped while still
+improving, not because it plateaued. Peak VRAM 3.98 GiB, 485–514 s/epoch at 10
+workers.
+
+**Holding the predictor's LR constant is worth +1.73 pp**, on the one exactly
+matched comparison (epoch 19: 7.39% vs 5.66%, ~3.9 SE). The confound favours
+the losing run — it was fully annealed at epoch 19 while the winner was
+mid-cosine at 100x the LR — so the effect is conservative.
+
+### The gate's own calibration was wrong, and rank is not quality
+
+`benchmarks/ssl_probe_calibration.py` scores any checkpoint against two
+anchors through the identical probe (`--seed 0`; the random-init anchor is a
+*sample* and moved 2.80% → 3.36% unseeded):
+
+| encoder | kNN top-1 | feat_std | effective rank |
+| --- | --- | --- | --- |
+| random init | 2.80% | 0.0074 | 4.8 / 512 |
+| `gate-50ep` @ epoch 30 | 10.42% | 0.0227 | 19.4 / 512 |
+| supervised 90ep (63.83%) | 61.16% | 0.0341 | 184.7 / 512 |
+
+- **`feat_std` against `1/sqrt(512)` = 0.0442 was never a valid test.**
+  `collapse_metrics` runs on the encoder output, but that reference describes
+  SimSiam's *projector* output. `ResidualBlock` applies ReLU after the add, so
+  features are non-negative and sit in the positive orthant (`frac>=0` is
+  1.000 for all three encoders) where per-dimension std is structurally lower.
+  The 63.83% checkpoint only reaches 0.0341. `feat_std` never left
+  0.0218–0.0227 across `gate-50ep`'s six probes while kNN nearly tripled: it
+  carries no information here.
+- **Effective rank is a collapse diagnostic, not a quality measure.** The two
+  diverge: `gate-50ep`'s rank went flat at epoch 14 (+0.09) in the same
+  interval its kNN posted its largest gain (+1.47). A rank-based projection
+  fitted mid-run predicted 18.8 at epoch 49 — already exceeded at epoch 29.
+  Use kNN for quality; use rank only against the 4.8 floor to rule out
+  collapse.
+- The kNN probe cannot resolve below ~0.6 pp (val-dev is 6,063 queries, 95% CI
+  ±0.58 pp). `gate-20ep`'s last three probes span 0.30 pp and are mutually
+  indistinguishable. Effective rank is far more precise (bootstrap std ±0.094)
+  — which is exactly the trap: precision is not validity.
+- **One flat probe interval is not a stall.** Both runs show flat-then-resume.
+  Require two consecutive intervals inside the noise band before acting.
+- **The floor is the random encoder, not `1/251`.** Against the 0.40% chance
+  rate every kNN number here looks like a result; against an untrained
+  `FoodCNN`'s 2.80% — most of which is architecture and centre-crop bias rather
+  than anything learned — `gate-20ep` bought +2.86 pp and `gate-50ep` +7.62 pp.
+  Quote the gap over random init, never the raw kNN.
+
+### The control already exists
+
+Phase D's LR search ran as 15-epoch `src/main.py` proxies (`epochs 15, batch
+256, augment none, val_subset dev`), and those logs and checkpoints survive:
+
+| lr | 0.05 | 0.1 | 0.2 | 0.4 | 0.6 | 0.8 |
+| --- | --- | --- | --- | --- | --- | --- |
+| from-scratch val-dev top-1 | 43.96% | 49.41% | 52.56% | 54.02% | 54.96% | 55.58% |
+
+That is a matched control for the finetune — same epochs, recipe, split, only
+the initialisation differs — so "does SSL pretraining help" costs ~2 h instead
+of the ~23–27 h a 200-epoch pretrain would. `benchmarks/significance_test.py`
+supplies paired McNemar's against `checkpoints/phaseD-lr<X>-best.pth.tar`,
+which matters because **no configuration in this project has ever been run
+twice**, so there is no run-to-run variance estimate to lean on.
+
+**Next, in order:**
+
+- [ ] Finetune sweep from `gate-50ep`, 15 epochs at lr 0.1 / 0.2 / 0.4 / 0.8
+      (~25 min each). `--init-encoder` changes nothing about the schedule, so
+      lr=0.8 — tuned for from-scratch — would likely wash the trunk out during
+      warmup; if pretraining is doing real work the optimum should shift down.
+- [ ] Paired McNemar's for each against the matched Phase D checkpoint.
+- [ ] Only if that clears: resume `gate-50ep` (`--resume`, history is carried
+      in the checkpoint) or pretrain longer. It was still gaining when stopped.
+- [ ] **A longer supervised schedule** — not "more epochs". This plan used to
+      claim the 90-epoch run "never converged" because val rose 61.47% → 64.36%
+      over its final nine epochs. **Re-measured 2026-09-16, that reading was
+      wrong**: the rise is the end-of-cosine convergence jump, and it was
+      obtained by fitting across an LR anneal (0.052 → 0.0003) from a local dip
+      at epoch 80 to the global peak at 86. Over the last 8 epochs the slope is
+      +0.131 pts/epoch against a std of 0.38 — flat within noise — while
+      `train_loss` keeps falling 2.55 → 2.23. On uncleaned web data that
+      divergence is noise-fitting, not underfitting. More epochs on the *same*
+      cosine therefore buy nothing; the LR is already ~0. A longer schedule
+      (120 or 150-epoch cosine) is a real and untested experiment, but it needs
+      its own justification rather than this one.
+- [x] **Pseudo-labeled `test_set` with the 63.83% teacher**, measured
+      2026-09-16 — `benchmarks/make_pseudo_labels.py`, 28,377 images,
+      `splits/pseudo_labels.csv`. This is the only path that feeds the
+      supervised checkpoint back into Phase E at all. Teacher scored 64.32% on
+      val-dev in the same pass, matching its logged 64.36%.
+
+      | floor | kept | % of pool | % of train_set | val-dev precision | classes |
+      | --- | --- | --- | --- | --- | --- |
+      | 0.00 | 28,377 | 100% | 24.0% | 64.32% | 251 |
+      | 0.50 | 14,178 | 50.0% | 12.0% | 86.23% | 251 |
+      | 0.70 | 9,546 | 33.6% | 8.1% | 93.14% | 249 |
+      | 0.80 | 7,264 | 25.6% | 6.1% | 94.97% | 246 |
+      | 0.90 | 4,631 | 16.3% | 3.9% | 97.07% | 235 |
+      | 0.95 | 2,894 | 10.2% | 2.4% | 98.31% | 219 |
+      | 0.99 | 830 | 2.9% | 0.7% | 99.32% | 157 |
+
+      Precision is measured on val-dev, which the teacher was selected on, so
+      read it as an optimistic bound rather than an estimate.
+
+      **The usable floor is ~0.70, not the 0.90 default.** Two reasons the
+      normal instinct to go high is wrong here. Volume: 0.90 keeps 4,631
+      images, **3.9%** on top of train_set, too little to expect a measurable
+      move at 63.83%. And coverage collapses as the floor rises — 0.99 keeps
+      only 157 of 251 classes, so a high floor does not merely shrink the
+      addition, it skews it toward the classes already easiest, which is the
+      opposite of where the headroom is. At 0.70 it is 8.1% more data, 249/251
+      classes, at ~6.9% label error — **cleaner than train_set's own web
+      labels**, which is the real argument for self-training on this dataset
+      (see the label-noise note in §Phase D).
+- [x] **Trained it — no measurable gain**, measured 2026-09-16.
+      `main.py --pseudo-labels splits/pseudo_labels.csv
+      --pseudo-label-min-confidence 0.7`, 90 epochs at lr 0.8, batch 256,
+      `--augment none --loss ce`, against `full-90ep-lr0.8` as the matched
+      control (same config, 118,475 vs 128,021 train images). 2.59 h against the
+      control's 2.09 h. Best val-dev 65.20% at epoch 85 vs the control's 64.36%
+      at 86. Paired McNemar's, best checkpoint vs best checkpoint:
+
+      | split | n | control | pseudo-label | delta | discordant (b/c) | p |
+      | --- | --- | --- | --- | --- | --- | --- |
+      | val-dev | 6,063 | 64.23% | 65.08% | +0.86 | 426 / 478 | 0.090 |
+      | val-test | 5,931 | 63.87% | 64.14% | +0.27 | 416 / 432 | 0.607 |
+
+      **The two rows are the result.** val-dev both chose the 0.70 floor (off the
+      sweep above) and chose each run's best epoch, and it returns +0.86; the
+      untouched val-test returns +0.27 at p=0.61. The ~0.6-point spread between
+      them is selection effect, so val-test is the number that stands. Reporting
+      the pre-registered val-dev figure alone would have implied a
+      near-significant win the held-out split does not support.
+
+      Discordance says the same from the other side: 848 val-test images where
+      the two models differ in correctness, splitting 416/432. Self-training moved
+      many individual predictions and netted 16 — churn, not learning.
+
+      This is the arithmetic at the top of Phase E coming due. +24% unlabeled
+      pool at best, no new classes, and a 64%-accurate teacher can only propagate
+      its own decision boundary; 8.1% more images at ~93% precision carried no
+      information the trunk lacked. **Stop here rather than sweeping the floor** —
+      0.50 buys volume at 86% precision and 0.90 buys 3.9% more data with coverage
+      down to 235 classes, both worse trades than the 0.70 midpoint that just
+      failed. A negative result, and the only experiment in the project that used
+      the trained CNN and the unlabeled pool together.
+
+      Two measurement cautions worth carrying forward, both hit during this run.
+      Mid-cosine the run trailed the control by 6–12 points and finished ahead: a
+      per-decade delta table fitted across an LR anneal measures the anneal, not
+      the treatment — the same trap as the retired "never converged" claim above.
+      And the run was killed at epoch 82 by session teardown, because `nohup`
+      only shields SIGHUP; `setsid` survives it, and per-epoch `run_history`
+      inside the checkpoint made the restart free.
 
 **Where to run it**: `notebooks/colab_gpu_probe.ipynb` benchmarks
 `FoodCNN` on whatever GPU Colab assigns that session, using
@@ -593,7 +783,10 @@ SimCLR is excluded — it degrades below ~1k batch, unreachable in 8 GB.
 needed) at the same settings behind the 1688 img/s local baseline above —
 its printed speedup multiplier is what decides whether the 200-epoch
 pretrain runs locally or there. Not run yet; needs a manual pass on
-colab.research.google.com before its numbers can be trusted.
+colab.research.google.com before its numbers can be trusted. **The gate run
+raised the stakes on this**: the decision is now between ~23–27 h locally and
+whatever that multiplier implies, not the ~8 h assumed when the probe was
+written.
 
 ## Phase F — report
 
@@ -610,21 +803,51 @@ colab.research.google.com before its numbers can be trusted.
 | C addendum — width floor + heads (5 x 19 min, measured) | 1.6 |
 | D — recipe proxies (8 x 18 min) | 2.4 |
 | D — full supervised run (90 ep) | 1.8 |
-| E — SSL track including control | ~18 |
+| E — SimSiam pretrains actually run (20 ep + 31 ep, measured) | 5.7 |
+| E — pseudo-label 90-epoch run + paired tests (measured) | 2.6 |
+| **total spent so far** | **15.3** |
+| E — finetune sweep + paired tests (planned, 4 x 25 min) | ~2 |
 | slack / reruns | 3 |
-| **total** | **~26** |
+| **total projected** | **~20.3** |
 
-The supervised half of this is ~5 GPU-h; Phase E is the other 70%. Note the
-earlier estimate of ~29 h was measured in `balanced` power profile and under
-contention, understating throughput by ~1.7x — the totals happen to land close
-together, but for unrelated reasons.
+The `~18` originally budgeted for "E — SSL track including control" assumed a
+200-epoch pretrain at ~8 h. Measured, that pretrain is **~23–27 h** alone —
+200 epochs at the 407 s/epoch of `gate-20ep` is 22.6 h, at the 492 s/epoch of
+`gate-50ep` 27.4 h — and the full phase ~50 GPU-h, which is what retired it in
+favour of the finetune-first plan above. The 5.7 h of pretraining is logged wall
+clock (5,281 s + 15,264 s); the crashed first attempt's eight epochs are not in
+it, since their wall clock was never logged separately, and at the measured rate
+they would add ~0.9 h.
+
+The supervised rows are ~7 GPU-h and Phase E ~5.7 so far, so the split is close
+to even rather than the 70/30 this table assumed when Phase E was a projection.
+Note the earlier estimate of ~29 h was measured in `balanced` power profile and
+under contention, understating throughput by ~1.7x.
+
+**The estimate that broke was the per-epoch one.** A pretrain epoch was costed
+at ~2x a supervised epoch for the second augmented view; it measures **5.7–6.8x**
+(407–492 s against 72 s). Two compounding reasons: the supervised 72 s baseline
+was measured on train alone (118,475 images) while the pretrain reads train+test
+(146,852), and SimSiam's augmentation stack is much heavier per image
+(ColorJitter, grayscale, a 17-px GaussianBlur). Every row above is measured wall
+clock except the finetune sweep and slack, which are arithmetic on the measured
+per-epoch rate.
 
 ## Decisions taken
 
 - **Val split: 50/50 stratified `val-dev` / `val-test`.** Model selection never
   touches `val-test`; the report quotes it once.
-- **SSL scope: the full setting, 200 epochs at 176 px**, with the
-  equal-GPU-hours supervised control.
+- **SSL scope: ~~the full setting, 200 epochs at 176 px~~ — retaken 2026-09-15,
+  on cost rather than on principle.** The original decision was taken against a
+  ~18 h Phase E. Measured, a pretrain epoch is 407–492 s, so the same scope
+  projects to ~50 h with the equal-GPU-hours control alone at ~24 h — a length
+  with no precedent here to size it against, since the supervised schedule has
+  only ever been run to 90 epochs. Nothing measured argues the 200 epochs are
+  wrong; what changed is the price. **Replaced by the finetune-first plan in
+  §Phase E**: finetune the 31-epoch `gate-50ep` trunk against Phase D's
+  15-epoch LR sweep, which is a matched control that already exists, for ~2 h
+  instead of ~27. Resuming the pretrain stays open and is the first thing to
+  buy if that clears — `gate-50ep` was still gaining when it was stopped.
 - **Trunk for Phase D: the baseline `[2,2,2,1]` 64-512, provisionally.**
   Phase C ruled out the 5-stage variant but left baseline / `[2,2,4,1]` /
   `[2,2,2,2]` 64-448 within 1.17 points on a single seed each — not enough

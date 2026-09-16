@@ -21,6 +21,61 @@ def _run(label: str, *, with_top3: bool = True) -> dict:
     return {"label": label, "history": history}
 
 
+def _ssl_run(label: str = "gate", probe_freq: int = 2) -> dict:
+    # An SSL log writes every key every epoch but only fills the probe metrics
+    # on probe epochs, so the gaps are None rather than absent keys.
+    history = []
+    for epoch in range(4):
+        probed = (epoch + 1) % probe_freq == 0
+        history.append({
+            "epoch": epoch,
+            "lr": 0.05,
+            "train_loss": -0.4 - epoch * 0.05,
+            "train_acc1": None,
+            "val_acc1": None,
+            "knn_acc1": 3.0 + epoch if probed else None,
+            "feat_std": 0.01 + epoch * 0.001 if probed else None,
+            "effective_rank": 5.0 + epoch * 2 if probed else None,
+        })
+    return {"label": label, "history": history}
+
+
+def test_series_skips_present_but_none_values() -> None:
+    # An SSL run records knn_acc1 on every epoch and fills it only on probe
+    # epochs; `key in record` is True for the None ones, so filtering on
+    # presence alone would hand matplotlib a list full of None.
+    epochs, values = _series(_ssl_run()["history"], "knn_acc1")
+
+    assert epochs == [1, 3]
+    assert values == [4.0, 6.0]
+
+
+def test_ssl_run_plots_probe_panels(tmp_path: pathlib.Path) -> None:
+    out_path = tmp_path / "ssl-curves.png"
+    plot_learning_curves(_ssl_run(), out_path)
+
+    assert out_path.exists()
+    assert out_path.stat().st_size > 0
+
+
+def test_ssl_comparison_plots_effective_rank(tmp_path: pathlib.Path) -> None:
+    out_path = tmp_path / "cmp.png"
+    plot_comparison([_ssl_run("a"), _ssl_run("b")], "effective_rank", out_path)
+
+    assert out_path.exists()
+    assert out_path.stat().st_size > 0
+
+
+def test_supervised_run_still_plots_two_panels(tmp_path: pathlib.Path) -> None:
+    # The SSL layout must not leak into a supervised run, which has no probe
+    # metrics at all and would otherwise get an empty third panel.
+    out_path = tmp_path / "sup.png"
+    plot_learning_curves(_run("baseline"), out_path)
+
+    assert out_path.exists()
+    assert out_path.stat().st_size > 0
+
+
 def test_series_skips_epochs_missing_the_key() -> None:
     # Older run logs predate top-3/lr tracking and simply lack those keys --
     # the plotter has to degrade gracefully, not crash on a real log.

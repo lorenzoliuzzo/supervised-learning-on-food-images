@@ -87,11 +87,19 @@ parser.add_argument('--run-label', default='run', type=str,
 parser.add_argument('--log-dir', default='runs', type=str,
                     help='directory per-run JSON logs are written to')
 parser.add_argument('--init-encoder', default='', type=str, metavar='PATH',
-                    help='path to a simsiam.py checkpoint (Phase E) to seed the trunk '
+                    help='path to a simsiam.py or main.py checkpoint to seed the trunk '
                          'from -- only features/avgpool weights are copied, the '
                          'classifier stays randomly initialized. Mutually exclusive '
                          'with --resume: this starts a new supervised run from '
                          'pretrained weights, --resume continues an existing one.')
+parser.add_argument('--pseudo-labels', default='', type=str, metavar='PATH',
+                    help='CSV of image_name,label,confidence over test_set, from '
+                         'benchmarks/make_pseudo_labels.py. Rows at or above '
+                         '--pseudo-label-min-confidence join train_set for this run.')
+parser.add_argument('--pseudo-label-min-confidence', default=0.9, type=float, metavar='P',
+                    help='confidence floor for --pseudo-labels rows (default: 0.9). '
+                         'Trades pseudo-label precision against how many of the '
+                         '28,377 unlabeled images are usable at all.')
 parser.add_argument('--augment', default='none', choices=['none', 'trivial', 'rand'],
                     help='extra train-time augmentation policy on top of crop+flip '
                          '(default: none)')
@@ -102,6 +110,11 @@ parser.add_argument('--crop-scale-min', default=0.08, type=float,
                          'fraction of the image a train view may be cropped from. '
                          '0.08 is the ImageNet default inherited from the reference '
                          'script and is aggressive for 90k images (default: 0.08)')
+parser.add_argument('--crop-size', default=176, type=int, metavar='N',
+                    help='train-time RandomResizedCrop size. Validation resolution '
+                         'scales with it (see eval_resolution), keeping the FixRes '
+                         'correction every measured number already includes '
+                         '(default: 176)')
 parser.add_argument('--ema', action='store_true',
                     help='track an exponential moving average of weights and '
                          'validate against it instead of the raw weights')
@@ -174,13 +187,51 @@ def dataset_paths(
     return train, val
 
 
+def load_pseudo_label_subset(
+    path: str | pathlib.Path, min_confidence: float
+) -> set[str]:
+    # Kept separate from FoodX251Dataset's own CSV read so the confidence
+    # column stays out of the dataset class: the file is written once per
+    # teacher and thresholded per run, so the survivors are a property of this
+    # run, not of the file.
+    csv_path = pathlib.Path(path)
+    if not csv_path.is_file():
+        raise FileNotFoundError(
+            f"no pseudo-label CSV at '{csv_path}' -- generate one with "
+            "benchmarks/make_pseudo_labels.py <teacher-checkpoint>"
+        )
+    df = pd.read_csv(csv_path)
+    missing = {'image_name', 'label', 'confidence'} - set(df.columns)
+    if missing:
+        raise ValueError(f"'{csv_path}' is missing column(s) {sorted(missing)}")
+    kept = df[df['confidence'] >= min_confidence]
+    if kept.empty:
+        raise ValueError(
+            f"no pseudo-label in '{csv_path}' reaches confidence "
+            f"{min_confidence} (max is {df['confidence'].max():.4f})"
+        )
+    return set(kept['image_name'])
+
+
+def eval_resolution(crop_size: int) -> tuple[int, int]:
+    # FixRes: RandomResizedCrop makes objects look larger at train time than a
+    # centre crop does at test time, and evaluating higher corrects the shift.
+    # main.py has always trained at 176 and evaluated at Resize(256)/Crop(224);
+    # this preserves that exact pair at crop_size=176 and carries the same
+    # ratio to any other resolution, so --crop-size can't silently un-apply a
+    # correction every measured number in the roadmap already includes.
+    eval_crop = round(crop_size * 224 / 176 / 16) * 16
+    return round(eval_crop * 256 / 224), eval_crop
+
+
 def build_train_transform(augment: str, normalize: transforms.Normalize,
-                          crop_scale_min: float = 0.08) -> transforms.Compose:
+                          crop_scale_min: float = 0.08,
+                          crop_size: int = 176) -> transforms.Compose:
     # TrivialAugment/RandAugment operate on the PIL image, so they slot in
     # after the geometric transforms and before ToTensor -- not appended, or
     # they'd run on an already-normalized tensor.
     pipeline: list[object] = [
-        transforms.RandomResizedCrop(TRAIN_CROP, scale=(crop_scale_min, 1.0)),
+        transforms.RandomResizedCrop(crop_size, scale=(crop_scale_min, 1.0)),
         transforms.RandomHorizontalFlip(),
     ]
     if augment == 'trivial':
@@ -563,19 +614,36 @@ def main_worker(gpu, ngpus_per_node, args):
 
     (train_dir, train_labels), (val_dir, val_labels) = dataset_paths(args.data)
 
-    train_dataset = FoodX251Dataset(
-        train_dir,
-        train_labels,
-        build_train_transform(args.augment, normalize, args.crop_scale_min)
-    )
+    train_transform = build_train_transform(
+        args.augment, normalize, args.crop_scale_min, args.crop_size)
+    train_dataset = FoodX251Dataset(train_dir, train_labels, train_transform)
 
+    if args.pseudo_labels:
+        # The pseudo-labeled images get the same augmentation as the real ones.
+        # Weakening it for them would confound "does self-training help" with
+        # "does this subset see an easier pipeline".
+        subset = load_pseudo_label_subset(
+            args.pseudo_labels, args.pseudo_label_min_confidence)
+        pseudo_dataset = FoodX251Dataset(
+            pathlib.Path(args.data) / 'test_set',
+            args.pseudo_labels,
+            train_transform,
+            subset=subset,
+        )
+        pool_size = len(pd.read_csv(args.pseudo_labels))
+        print(f"=> pseudo-labels: {len(pseudo_dataset)} of {pool_size} test_set images "
+              f"at confidence >= {args.pseudo_label_min_confidence} "
+              f"({100.0 * len(pseudo_dataset) / len(train_dataset):.1f}% of train_set)")
+        train_dataset = torch.utils.data.ConcatDataset([train_dataset, pseudo_dataset])
+
+    val_resize, val_crop = eval_resolution(args.crop_size)
     val_subset = load_val_split(args.val_split, args.val_subset)
     val_dataset = FoodX251Dataset(
         val_dir,
         val_labels,
         transforms.Compose([
-            transforms.Resize(256),
-            transforms.CenterCrop(224),
+            transforms.Resize(val_resize),
+            transforms.CenterCrop(val_crop),
             transforms.ToTensor(),
             normalize,
         ]),
@@ -601,7 +669,13 @@ def main_worker(gpu, ngpus_per_node, args):
         validate(val_loader, model, criterion, args, amp_dtype)
         return
 
-    run_config = vars(args) | {'val_subset_size': len(val_dataset)}
+    run_config = vars(args) | {
+        'val_subset_size': len(val_dataset),
+        # With --pseudo-labels this is train_set plus the surviving rows, which
+        # the threshold alone doesn't pin down -- the CSV can be regenerated
+        # from a different teacher.
+        'train_set_size': len(train_dataset),
+    }
     run = (RunLog.restore(args.run_label, run_config, resumed_checkpoint)
            if resumed_checkpoint is not None
            else RunLog(label=args.run_label, config=run_config))
@@ -800,21 +874,40 @@ def validate(val_loader, model, criterion, args, amp_dtype):
 
 
 def load_encoder_weights(model: nn.Module, checkpoint_path: str) -> None:
-    # A simsiam.py checkpoint's state_dict keys are prefixed `encoder.` (the
-    # FoodCNN instance SimSiamModel wraps) -- but that FoodCNN carries its
-    # own unused classifier too, so filtering on the `encoder.` prefix alone
-    # would smuggle those weights in as well. `encoder.features.` is the
-    # trunk specifically (avgpool has no parameters of its own).
+    # Two checkpoint layouts carry a usable trunk: a simsiam.py checkpoint
+    # prefixes its keys `encoder.` (the FoodCNN that SimSiamModel wraps),
+    # while a main.py checkpoint does not. Matching on `features.` rather than
+    # the bare `encoder.` prefix accepts both and keeps the wrapped FoodCNN's
+    # own unused classifier out of it either way (avgpool has no parameters).
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
     state_dict = checkpoint['state_dict']
     encoder_state = {
-        key[len('encoder.'):]: value
+        key.removeprefix('encoder.'): value
         for key, value in state_dict.items()
-        if key.startswith('encoder.features.')
+        if key.startswith(('features.', 'encoder.features.'))
     }
+    # strict=False is needed to leave the classifier alone, which also means it
+    # will happily accept a checkpoint whose keys match nothing at all and
+    # train from scratch while the log claims otherwise. Both failures below
+    # were real: `features.`-only matching silently no-op'd on every main.py
+    # checkpoint until 2026-09-16.
+    if not encoder_state:
+        raise ValueError(
+            f"'{checkpoint_path}' has no trunk weights to load: none of its "
+            f"{len(state_dict)} state_dict keys start with 'features.' or "
+            "'encoder.features.'. Expected a main.py or simsiam.py checkpoint."
+        )
     missing, unexpected = model.load_state_dict(encoder_state, strict=False)
+    unfilled = [key for key in missing if key.startswith('features.')]
+    if unfilled or unexpected:
+        raise ValueError(
+            f"'{checkpoint_path}' does not match this FoodCNN's trunk: "
+            f"{len(unfilled)} trunk tensors left uninitialized "
+            f"(e.g. {unfilled[:3]}), {len(unexpected)} unexpected "
+            f"(e.g. {list(unexpected)[:3]}). Same architecture required."
+        )
     print(f"=> loaded encoder weights from '{checkpoint_path}' "
-          f"({len(encoder_state)} tensors; missing={len(missing)}, unexpected={len(unexpected)})")
+          f"({len(encoder_state)} trunk tensors; classifier left random)")
 
 
 def checkpoint_weights(model: nn.Module, ema_model: nn.Module | None) -> dict[str, object]:

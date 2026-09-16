@@ -36,6 +36,7 @@ def test_save_writes_history_and_metadata(tmp_path: pathlib.Path) -> None:
     assert payload["history"][1] == {
         "epoch": 1, "lr": 0.04, "train_loss": 4.5, "train_acc1": 2.0, "train_acc3": 4.0,
         "train_acc5": 7.0, "val_acc1": 1.0, "val_acc3": 2.5, "val_acc5": 4.0,
+        "knn_acc1": None, "feat_std": None, "effective_rank": None,
     }
 
 
